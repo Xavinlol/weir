@@ -185,7 +185,35 @@ impl RateLimitManager {
         AcquireResult::BucketLimited { retry_after }
     }
 
-    /// Update rate limit state from Discord response headers (called on every response).
+    /// Run periodic cleanup of expired buckets.
+    pub async fn run_cleanup(&self, interval: Duration, ttl: Duration) {
+        let mut tick = tokio::time::interval(interval);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            self.cleanup_expired(ttl);
+        }
+    }
+
+    /// Evict buckets that haven't been used within the given TTL.
+    /// Returns the number of evicted entries.
+    pub fn cleanup_expired(&self, ttl: Duration) -> u64 {
+        let mut evicted = 0u64;
+        for entry in &self.tokens {
+            let state = entry.value();
+            let before = state.buckets.len();
+            state.buckets.retain(|_, e| !e.bucket.is_expired(ttl));
+            evicted += before.saturating_sub(state.buckets.len()) as u64;
+        }
+
+        let before = self.ip_state.buckets.len();
+        self.ip_state.buckets.retain(|_, e| !e.bucket.is_expired(ttl));
+        evicted += before.saturating_sub(self.ip_state.buckets.len()) as u64;
+
+        evicted
+    }
+
+    /// Update rate limit state from Discord response headers.
     pub fn update_from_response(
         &self,
         auth: &AuthType,
@@ -435,5 +463,37 @@ mod tests {
         manager.handle_rate_limit(&auth, &key, false, true, Duration::from_secs(30));
 
         assert!(manager.cloudflare.is_blocked().is_some());
+    }
+
+    #[test]
+    fn cleanup_evicts_expired_buckets() {
+        let manager = RateLimitManager::new(50, 5000);
+        let auth = AuthType::Bot("123".to_owned());
+        let key = test_key("GET", Resource::Channels, "456");
+
+        manager.update_from_response(&auth, &key, Some("abc"), Some(5), Some(10), Some(1.0));
+
+        let state = manager.get_state(&auth);
+        assert_eq!(state.buckets.len(), 1);
+
+        let evicted = manager.cleanup_expired(Duration::ZERO);
+        assert_eq!(evicted, 1);
+        assert_eq!(state.buckets.len(), 0);
+    }
+
+    #[test]
+    fn cleanup_preserves_fresh_buckets() {
+        let manager = RateLimitManager::new(50, 5000);
+        let auth = AuthType::Bot("123".to_owned());
+        let key = test_key("GET", Resource::Channels, "456");
+
+        manager.update_from_response(&auth, &key, Some("abc"), Some(5), Some(10), Some(1.0));
+
+        let state = manager.get_state(&auth);
+        assert_eq!(state.buckets.len(), 1);
+
+        let evicted = manager.cleanup_expired(Duration::from_secs(3600));
+        assert_eq!(evicted, 0);
+        assert_eq!(state.buckets.len(), 1);
     }
 }

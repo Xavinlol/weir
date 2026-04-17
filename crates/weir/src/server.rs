@@ -48,6 +48,13 @@ pub async fn run(config: Config) -> Result<()> {
         config: Arc::new(config),
     };
 
+    let limiter = Arc::clone(&state.rate_limiter);
+    let ttl = Duration::from_millis(state.config.ratelimit.bucket_ttl_ms);
+    let cleanup_interval = Duration::from_millis(state.config.ratelimit.cleanup_interval_ms);
+    tokio::spawn(async move {
+        limiter.run_cleanup(cleanup_interval, ttl).await;
+    });
+
     let addr = SocketAddr::new(state.config.server.host, state.config.server.port);
     let listener = TcpListener::bind(addr).await?;
 

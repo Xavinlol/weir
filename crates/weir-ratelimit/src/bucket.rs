@@ -77,7 +77,7 @@ impl Bucket {
         let last = self.last_used_ms.load(Ordering::Relaxed);
         #[allow(clippy::cast_possible_truncation)]
         let ttl_ms = ttl.as_millis() as u64;
-        now.saturating_sub(last) > ttl_ms
+        now.saturating_sub(last) >= ttl_ms
     }
 }
 
