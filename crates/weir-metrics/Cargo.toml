@@ -11,3 +11,5 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true

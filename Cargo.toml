@@ -36,6 +36,9 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 base64 = "0.22"
 
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
+
 weir-ratelimit = { path = "crates/weir-ratelimit" }
 weir-metrics = { path = "crates/weir-metrics" }
 
