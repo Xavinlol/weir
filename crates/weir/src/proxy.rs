@@ -3,12 +3,12 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderValue, Request, Response, StatusCode};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 use weir_ratelimit::memory::{AcquireResult, AuthType};
 use weir_ratelimit::route::parse_bucket_key;
 
 use crate::request::Auth;
-use crate::response::{RateLimitHeaders, has_via_header};
+use crate::response::{RateLimitHeaders, RateLimitScope, has_via_header};
 use crate::server::AppState;
 
 const DISCORD_BASE: &str = "https://discord.com";
@@ -20,6 +20,7 @@ struct RateLimitBody {
     retry_after: Option<f64>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn handle(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -94,6 +95,19 @@ pub async fn handle(
     })?;
 
     let rl_headers = RateLimitHeaders::from_headers(&headers);
+
+    let is_invalid = matches!(status.as_u16(), 401 | 403)
+        || (status == StatusCode::TOO_MANY_REQUESTS
+            && rl_headers.scope != Some(RateLimitScope::Shared)
+            && has_via_header(&headers));
+    if is_invalid {
+        let count = state.rate_limiter.invalid_requests.track();
+        if count >= 9500 {
+            error!(count, "approaching invalid request limit (10000/10min)");
+        } else if count >= 8000 {
+            warn!(count, "high invalid request count (10000/10min)");
+        }
+    }
 
     if status == StatusCode::TOO_MANY_REQUESTS {
         handle_429(

@@ -6,6 +6,7 @@ use dashmap::DashMap;
 
 use crate::bucket::Bucket;
 use crate::global::GlobalRateLimit;
+use crate::invalid::InvalidRequestCounter;
 use crate::queue::RequestQueue;
 use crate::route::BucketKey;
 
@@ -106,6 +107,7 @@ impl std::fmt::Debug for TokenState {
 /// In-memory rate limit manager.
 pub struct RateLimitManager {
     pub cloudflare: Arc<CloudflareState>,
+    pub invalid_requests: InvalidRequestCounter,
     tokens: DashMap<String, Arc<TokenState>>,
     /// Shared state for unauthenticated requests (webhooks with token in URL).
     ip_state: Arc<TokenState>,
@@ -117,6 +119,7 @@ impl RateLimitManager {
     pub fn new(global_limit_default: u32, queue_timeout_ms: u64) -> Self {
         Self {
             cloudflare: Arc::new(CloudflareState::new()),
+            invalid_requests: InvalidRequestCounter::new(),
             tokens: DashMap::new(),
             ip_state: Arc::new(TokenState::new(global_limit_default)),
             global_limit_default,
