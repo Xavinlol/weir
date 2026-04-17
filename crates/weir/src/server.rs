@@ -8,6 +8,7 @@ use axum::routing::get;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
+use weir_ratelimit::memory::RateLimitManager;
 
 use crate::config::Config;
 use crate::health;
@@ -17,6 +18,7 @@ use crate::proxy;
 pub struct AppState {
     pub http_client: reqwest::Client,
     pub config: Arc<Config>,
+    pub rate_limiter: Arc<RateLimitManager>,
 }
 
 fn build_router(state: AppState) -> Router {
@@ -35,8 +37,14 @@ pub async fn run(config: Config) -> Result<()> {
         .user_agent(format!("Weir/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
 
+    let rate_limiter = Arc::new(RateLimitManager::new(
+        config.ratelimit.global_limit_default,
+        config.ratelimit.queue_timeout_ms,
+    ));
+
     let state = AppState {
         http_client,
+        rate_limiter,
         config: Arc::new(config),
     };
 
