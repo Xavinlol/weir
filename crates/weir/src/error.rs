@@ -14,9 +14,6 @@ pub enum WeirError {
     #[error("request timeout after {timeout_ms}ms")]
     Timeout { timeout_ms: u64 },
 
-    #[error("circuit breaker open for Discord API")]
-    CircuitBreakerOpen,
-
     #[error("invalid authorization header")]
     InvalidAuth,
 

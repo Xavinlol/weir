@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderValue, Request, Response, StatusCode};
 use tracing::{debug, error, warn};
-use weir_ratelimit::memory::{AcquireResult, AuthType};
+use weir_ratelimit::memory::{AcquireResult, AuthType, HealthEvent};
 use weir_ratelimit::route::parse_bucket_key;
 
 use crate::request::Auth;
@@ -55,6 +55,14 @@ pub async fn handle(
             debug!(bucket = %bucket_key, "queue timeout");
             return Err(rate_limit_response(Duration::from_secs(1)));
         }
+        AcquireResult::TokenDisabled => {
+            warn!("token disabled due to consecutive errors");
+            return Err(error_response(StatusCode::FORBIDDEN, "token disabled"));
+        }
+        AcquireResult::WebhookDisabled => {
+            debug!(webhook_id = %bucket_key.major_id, "webhook auto-disabled");
+            return Err(error_response(StatusCode::NOT_FOUND, "webhook disabled"));
+        }
     }
 
     let target_url = build_target_url(&uri);
@@ -95,11 +103,19 @@ pub async fn handle(
     })?;
 
     let rl_headers = RateLimitHeaders::from_headers(&headers);
+    let has_via = has_via_header(&headers);
 
-    let is_invalid = matches!(status.as_u16(), 401 | 403)
-        || (status == StatusCode::TOO_MANY_REQUESTS
-            && rl_headers.scope != Some(RateLimitScope::Shared)
-            && has_via_header(&headers));
+    match state.rate_limiter.report_response(&auth_type, &bucket_key, status.as_u16(), has_via) {
+        HealthEvent::TokenDisabled => warn!("token auto-disabled due to consecutive errors"),
+        HealthEvent::WebhookDisabled => warn!(webhook_id = %bucket_key.major_id, "webhook auto-disabled"),
+        HealthEvent::CloudflareBanned => warn!("cloudflare ban detected (403 without via header)"),
+        HealthEvent::None => {}
+    }
+
+    let is_invalid = has_via
+        && (matches!(status.as_u16(), 401 | 403)
+            || (status == StatusCode::TOO_MANY_REQUESTS
+                && rl_headers.scope != Some(RateLimitScope::Shared)));
     if is_invalid {
         let count = state.rate_limiter.invalid_requests.track();
         if count >= 9500 {
@@ -115,7 +131,7 @@ pub async fn handle(
             &auth_type,
             &bucket_key,
             &rl_headers,
-            &headers,
+            has_via,
             &body_bytes,
         );
     } else {
@@ -180,11 +196,11 @@ fn handle_429(
     auth: &AuthType,
     key: &weir_ratelimit::route::BucketKey,
     rl_headers: &RateLimitHeaders,
-    raw_headers: &axum::http::HeaderMap,
+    has_via: bool,
     body: &[u8],
 ) {
     let is_global = rl_headers.is_global;
-    let is_cloudflare = !has_via_header(raw_headers);
+    let is_cloudflare = !has_via;
 
     let header_retry = rl_headers.reset_after.unwrap_or(1.0);
     let body_retry = serde_json::from_slice::<RateLimitBody>(body)

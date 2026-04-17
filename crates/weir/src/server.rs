@@ -8,7 +8,7 @@ use axum::routing::get;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
-use weir_ratelimit::memory::RateLimitManager;
+use weir_ratelimit::memory::{ManagerConfig, RateLimitManager};
 
 use crate::config::Config;
 use crate::health;
@@ -37,10 +37,18 @@ pub async fn run(config: Config) -> Result<()> {
         .user_agent(format!("Weir/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
 
-    let rate_limiter = Arc::new(RateLimitManager::new(
-        config.ratelimit.global_limit_default,
-        config.ratelimit.queue_timeout_ms,
-    ));
+    let overrides = config.ratelimit.overrides
+        .iter()
+        .map(|(k, v)| (k.clone(), v.global_limit))
+        .collect();
+
+    let rate_limiter = Arc::new(RateLimitManager::new(ManagerConfig {
+        global_limit_default: config.ratelimit.global_limit_default,
+        queue_timeout_ms: config.ratelimit.queue_timeout_ms,
+        overrides,
+        token_error_threshold: config.protection.consecutive_error_threshold,
+        webhook_404_threshold: config.protection.consecutive_404_threshold,
+    }));
 
     let state = AppState {
         http_client,

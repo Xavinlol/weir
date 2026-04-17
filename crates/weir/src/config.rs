@@ -71,10 +71,8 @@ pub struct BotOverride {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct ProtectionConfig {
-    pub max_401_per_minute: u32,
-    pub max_webhook_404_per_minute: u32,
-    pub circuit_breaker_threshold: u32,
-    pub circuit_breaker_reset_ms: u64,
+    pub consecutive_error_threshold: u32,
+    pub consecutive_404_threshold: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,10 +120,8 @@ impl Default for RatelimitConfig {
 impl Default for ProtectionConfig {
     fn default() -> Self {
         Self {
-            max_401_per_minute: 5,
-            max_webhook_404_per_minute: 10,
-            circuit_breaker_threshold: 10,
-            circuit_breaker_reset_ms: 30_000,
+            consecutive_error_threshold: 5,
+            consecutive_404_threshold: 10,
         }
     }
 }
