@@ -153,6 +153,9 @@ impl Config {
         if let Some(ref level) = cli.log_level {
             config.logging.level.clone_from(level);
         }
+        if let Some(metrics_port) = cli.metrics_port {
+            config.metrics.port = metrics_port;
+        }
 
         Ok(config)
     }

@@ -25,6 +25,10 @@ struct Cli {
     /// Override the log level.
     #[arg(short, long, env = "LOG_LEVEL")]
     log_level: Option<String>,
+
+    /// Override the metrics port.
+    #[arg(short, long, env = "METRICS_PORT")]
+    metrics_port: Option<u16>,
 }
 
 #[tokio::main]
