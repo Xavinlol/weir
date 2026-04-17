@@ -1,23 +1,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::elapsed_millis;
-
-const COUNT_BITS: u64 = 16;
-const COUNT_MASK: u64 = (1 << COUNT_BITS) - 1;
-
-#[inline]
-fn pack(window_ms: u64, count: u32) -> u64 {
-    (window_ms << COUNT_BITS) | u64::from(count)
-}
-
-#[inline]
-fn unpack(state: u64) -> (u64, u32) {
-    let window_ms = state >> COUNT_BITS;
-    #[allow(clippy::cast_possible_truncation)]
-    let count = (state & COUNT_MASK) as u32;
-    (window_ms, count)
-}
+use crate::{elapsed_millis, pack, unpack};
 
 /// Tracks the global rate limit for a single bot token.
 #[derive(Debug)]
