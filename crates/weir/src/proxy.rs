@@ -39,42 +39,52 @@ pub async fn handle(
     let bucket_key = parse_bucket_key(&method_str, path);
     let is_interaction = bucket_key.is_interaction();
 
+    let (auth_label, bot_id) = match &auth_type {
+        AuthType::Bot(id) => ("bot", id.as_str()),
+        AuthType::Bearer(id) => ("bearer", id.as_str()),
+        AuthType::Webhook => ("webhook", ""),
+    };
+    let route_label = match bucket_key.sub_resource {
+        Some(sub) => format!("{}/{sub}", bucket_key.resource),
+        None => bucket_key.resource.to_string(),
+    };
+
     match state.rate_limiter.acquire(&auth_type, &bucket_key, is_interaction).await {
         AcquireResult::Allowed => {}
         AcquireResult::CloudflareLimited { retry_after } => {
             warn!("cloudflare rate limited");
             counter!("weir_rate_limited_total", "kind" => "cloudflare").increment(1);
-            record_request(&method_str, "429", &auth_type, request_start);
+            record_request(&method_str, "429", auth_label, bot_id, &route_label, request_start);
             return Err(rate_limit_response(retry_after));
         }
         AcquireResult::GlobalLimited { retry_after } => {
             debug!("global rate limited");
             counter!("weir_rate_limited_total", "kind" => "global").increment(1);
-            record_request(&method_str, "429", &auth_type, request_start);
+            record_request(&method_str, "429", auth_label, bot_id, &route_label, request_start);
             return Err(rate_limit_response(retry_after));
         }
         AcquireResult::BucketLimited { retry_after } => {
             debug!(bucket = %bucket_key, "bucket rate limited");
             counter!("weir_rate_limited_total", "kind" => "bucket").increment(1);
-            record_request(&method_str, "429", &auth_type, request_start);
+            record_request(&method_str, "429", auth_label, bot_id, &route_label, request_start);
             return Err(rate_limit_response(retry_after));
         }
         AcquireResult::QueueTimeout => {
             debug!(bucket = %bucket_key, "queue timeout");
             counter!("weir_rate_limited_total", "kind" => "queue_timeout").increment(1);
-            record_request(&method_str, "429", &auth_type, request_start);
+            record_request(&method_str, "429", auth_label, bot_id, &route_label, request_start);
             return Err(rate_limit_response(Duration::from_secs(1)));
         }
         AcquireResult::TokenDisabled => {
             warn!("token disabled due to consecutive errors");
             counter!("weir_rate_limited_total", "kind" => "token_disabled").increment(1);
-            record_request(&method_str, "403", &auth_type, request_start);
+            record_request(&method_str, "403", auth_label, bot_id, &route_label, request_start);
             return Err(error_response(StatusCode::FORBIDDEN, "token disabled"));
         }
         AcquireResult::WebhookDisabled => {
             debug!(webhook_id = %bucket_key.major_id, "webhook auto-disabled");
             counter!("weir_rate_limited_total", "kind" => "webhook_disabled").increment(1);
-            record_request(&method_str, "404", &auth_type, request_start);
+            record_request(&method_str, "404", auth_label, bot_id, &route_label, request_start);
             return Err(error_response(StatusCode::NOT_FOUND, "webhook disabled"));
         }
     }
@@ -85,7 +95,7 @@ pub async fn handle(
         .await
         .map_err(|e| {
             warn!(error = %e, "failed to read request body");
-            record_request(&method_str, "400", &auth_type, request_start);
+            record_request(&method_str, "400", auth_label, bot_id, &route_label, request_start);
             error_response(StatusCode::BAD_REQUEST, "request body too large or unreadable")
         })?;
 
@@ -96,7 +106,7 @@ pub async fn handle(
         .build()
         .map_err(|e| {
             warn!(error = %e, "failed to build outgoing request");
-            record_request(&method_str, "500", &auth_type, request_start);
+            record_request(&method_str, "500", auth_label, bot_id, &route_label, request_start);
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "failed to build request")
         })?;
 
@@ -109,16 +119,16 @@ pub async fn handle(
     let discord_start = Instant::now();
     let response = state.http_client.execute(outgoing).await.map_err(|e| {
         warn!(error = %e, "discord request failed");
-        record_request(&method_str, "502", &auth_type, request_start);
+        record_request(&method_str, "502", auth_label, bot_id, &route_label, request_start);
         error_response(StatusCode::BAD_GATEWAY, "discord request failed")
     })?;
-    histogram!("weir_discord_latency_seconds").record(discord_start.elapsed().as_secs_f64());
+    histogram!("weir_discord_latency_seconds", "route" => route_label.clone()).record(discord_start.elapsed().as_secs_f64());
 
     let status = response.status();
     let headers = response.headers().clone();
     let body_bytes = response.bytes().await.map_err(|e| {
         warn!(error = %e, "failed to read discord response body");
-        record_request(&method_str, "502", &auth_type, request_start);
+        record_request(&method_str, "502", auth_label, bot_id, &route_label, request_start);
         error_response(StatusCode::BAD_GATEWAY, "failed to read response body")
     })?;
 
@@ -177,7 +187,7 @@ pub async fn handle(
 
     let status_str = status.as_str().to_owned();
 
-    record_request(&method_str, &status_str, &auth_type, request_start);
+    record_request(&method_str, &status_str, auth_label, bot_id, &route_label, request_start);
 
     if status.is_server_error() || (status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS) {
         counter!("weir_discord_errors_total", "status" => status_str).increment(1);
@@ -195,14 +205,18 @@ pub async fn handle(
     })
 }
 
-fn record_request(method: &str, status: &str, auth_type: &AuthType, start: Instant) {
-    let auth_label = match auth_type {
-        AuthType::Bot(_) => "bot",
-        AuthType::Bearer(_) => "bearer",
-        AuthType::Webhook => "webhook",
-    };
-    counter!("weir_requests_total", "method" => method.to_owned(), "status" => status.to_owned(), "auth_type" => auth_label).increment(1);
-    histogram!("weir_request_duration_seconds", "method" => method.to_owned(), "status" => status.to_owned()).record(start.elapsed().as_secs_f64());
+fn record_request(method: &str, status: &str, auth_label: &str, bot_id: &str, route: &str, start: Instant) {
+    counter!("weir_requests_total",
+        "method" => method.to_owned(),
+        "status" => status.to_owned(),
+        "auth_type" => auth_label.to_owned(),
+        "bot_id" => bot_id.to_owned(),
+        "route" => route.to_owned()
+    ).increment(1);
+    histogram!("weir_request_duration_seconds",
+        "method" => method.to_owned(),
+        "route" => route.to_owned()
+    ).record(start.elapsed().as_secs_f64());
 }
 
 fn extract_auth_type(headers: &axum::http::HeaderMap, _path: &str) -> AuthType {
