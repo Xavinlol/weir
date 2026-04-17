@@ -32,6 +32,13 @@ fn build_router(state: AppState) -> Router {
 pub async fn run(config: Config) -> Result<()> {
     let request_timeout = Duration::from_millis(config.server.request_timeout_ms);
 
+    if config.metrics.enabled {
+        let metrics_addr = SocketAddr::new(config.server.host, config.metrics.port);
+        weir_metrics::init(metrics_addr)
+            .map_err(|e| anyhow::anyhow!("failed to initialize metrics: {e}"))?;
+        info!(%metrics_addr, "metrics endpoint started");
+    }
+
     let http_client = reqwest::Client::builder()
         .timeout(request_timeout)
         .user_agent(format!("Weir/{}", env!("CARGO_PKG_VERSION")))

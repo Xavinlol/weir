@@ -374,6 +374,14 @@ impl RateLimitManager {
 
         HealthEvent::None
     }
+
+    pub fn bucket_count(&self) -> usize {
+        let mut total = self.ip_state.buckets.len();
+        for token in &self.tokens {
+            total += token.value().buckets.len();
+        }
+        total
+    }
 }
 
 impl std::fmt::Debug for RateLimitManager {
