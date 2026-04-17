@@ -5,6 +5,7 @@ use std::time::Instant;
 
 pub mod bucket;
 pub mod global;
+pub mod memory;
 pub mod queue;
 pub mod route;
 

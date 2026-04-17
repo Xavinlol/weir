@@ -67,6 +67,11 @@ impl Bucket {
     }
 
     #[inline]
+    pub fn limit(&self) -> u32 {
+        self.limit.load(Ordering::Relaxed)
+    }
+
+    #[inline]
     pub fn is_expired(&self, ttl: Duration) -> bool {
         let now = elapsed_millis();
         let last = self.last_used_ms.load(Ordering::Relaxed);
