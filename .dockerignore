@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+.idea/
+docker/
+grafana/
+tests/
+*.md
+*.log
+.env
+.gitignore
+.dockerignore
+rustfmt.toml

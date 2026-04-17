@@ -1,0 +1,30 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+request_timeout_ms = 10000
+graceful_shutdown_timeout_ms = 30000
+
+[logging]
+level = "info"
+format = "json"           # json | pretty
+access_log = true
+
+[ratelimit]
+backend = "memory"        # memory | redis
+global_limit_default = 50
+disable_global_detection = false
+bucket_ttl_ms = 86400000
+cleanup_interval_ms = 300000
+queue_timeout_ms = 10000
+
+# Per-bot global rate limit overrides
+# [ratelimit.overrides."bot_id_here"]
+# global_limit = 500
+
+[protection]
+consecutive_error_threshold = 5
+consecutive_404_threshold = 10
+
+[metrics]
+enabled = true
+port = 9000
