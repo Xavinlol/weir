@@ -9,7 +9,6 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/xavin/weir"
 homepage = "https://github.com/xavin/weir"
@@ -35,6 +34,9 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 clap = { version = "4", features = ["derive", "env"] }
 base64 = "0.22"
+
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
 weir-ratelimit = { path = "crates/weir-ratelimit" }
 weir-metrics = { path = "crates/weir-metrics" }
