@@ -7,6 +7,7 @@ pub mod bucket;
 pub mod global;
 pub mod invalid;
 pub mod memory;
+pub mod protection;
 pub mod queue;
 pub mod route;
 
