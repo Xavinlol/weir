@@ -46,18 +46,61 @@ impl fmt::Display for SubResource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+    Other,
+}
+
+impl Method {
+    pub fn from_http(s: &str) -> Self {
+        match s {
+            "GET" => Self::Get,
+            "POST" => Self::Post,
+            "PUT" => Self::Put,
+            "PATCH" => Self::Patch,
+            "DELETE" => Self::Delete,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl fmt::Display for Method {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+            Self::Other => "OTHER",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BucketKey {
+    pub method: Method,
     pub resource: Resource,
     pub major_id: String,
     pub sub_resource: Option<SubResource>,
 }
 
+impl BucketKey {
+    pub fn is_interaction(&self) -> bool {
+        self.resource == Resource::Interactions
+    }
+}
+
 impl fmt::Display for BucketKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.sub_resource {
-            Some(sub) => write!(f, "{}/{}/{sub}", self.resource, self.major_id),
-            None => write!(f, "{}/{}", self.resource, self.major_id),
+            Some(sub) => write!(f, "{}:{}/{}/{sub}", self.method, self.resource, self.major_id),
+            None => write!(f, "{}:{}/{}", self.method, self.resource, self.major_id),
         }
     }
 }
@@ -65,6 +108,7 @@ impl fmt::Display for BucketKey {
 /// Parse a Discord API path into a bucket key for rate limiting.
 #[inline]
 pub fn parse_bucket_key(method: &str, path: &str) -> BucketKey {
+    let method_enum = Method::from_http(method);
     let path = strip_api_prefix(path.trim_start_matches('/'));
     let (resource_str, rest) = path.split_once('/').unwrap_or((path, ""));
     let (major_id_str, sub_path) = rest.split_once('/').unwrap_or((rest, ""));
@@ -80,16 +124,19 @@ pub fn parse_bucket_key(method: &str, path: &str) -> BucketKey {
 
     match resource {
         Resource::Channels | Resource::Guilds => BucketKey {
+            method: method_enum,
             resource,
             major_id: major_id_str.to_owned(),
             sub_resource: classify_sub_resource(method, sub_path),
         },
         Resource::Webhooks => BucketKey {
+            method: method_enum,
             resource,
             major_id: major_id_str.to_owned(),
             sub_resource: None,
         },
         _ => BucketKey {
+            method: method_enum,
             resource,
             major_id: String::from("!"),
             sub_resource: None,
@@ -199,10 +246,32 @@ mod tests {
     #[test]
     fn display_format() {
         let key = BucketKey {
+            method: Method::Get,
             resource: Resource::Channels,
             major_id: "123".into(),
             sub_resource: Some(SubResource::Messages),
         };
-        assert_eq!(key.to_string(), "channels/123/messages");
+        assert_eq!(key.to_string(), "GET:channels/123/messages");
+    }
+
+    #[test]
+    fn is_interaction_true() {
+        let key = parse_bucket_key("POST", "/api/v10/interactions/123/token/callback");
+        assert!(key.is_interaction());
+    }
+
+    #[test]
+    fn is_interaction_false() {
+        let key = parse_bucket_key("GET", "/api/v10/channels/123/messages");
+        assert!(!key.is_interaction());
+    }
+
+    #[test]
+    fn method_stored_correctly() {
+        let get = parse_bucket_key("GET", "/api/v10/channels/123/messages");
+        let post = parse_bucket_key("POST", "/api/v10/channels/123/messages");
+        assert_eq!(get.method, Method::Get);
+        assert_eq!(post.method, Method::Post);
+        assert_ne!(get, post);
     }
 }
