@@ -13,10 +13,7 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
         .set_buckets(&latency_buckets)?
         .install()?;
 
-    describe_counter!(
-        "weir_requests_total",
-        "Total requests proxied through Weir"
-    );
+    describe_counter!("weir_requests_total", "Total requests proxied through Weir");
     describe_counter!(
         "weir_rate_limited_total",
         "Requests rate-limited by the proxy before reaching Discord"
@@ -62,4 +59,3 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

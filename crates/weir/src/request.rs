@@ -1,12 +1,18 @@
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 
 #[derive(Debug, Clone)]
 pub enum Auth {
-    Bot { bot_id: String },
-    Bearer { bot_id: String },
+    Bot {
+        bot_id: String,
+    },
+    Bearer {
+        bot_id: String,
+    },
     #[allow(dead_code)]
-    Webhook { webhook_id: String },
+    Webhook {
+        webhook_id: String,
+    },
     None,
 }
 
@@ -14,11 +20,15 @@ impl Auth {
     pub fn from_header(value: &str) -> Self {
         let value = value.trim();
 
-        if let Some(token) = value.strip_prefix("Bot ").or_else(|| value.strip_prefix("bot ")) {
+        if let Some(token) = value
+            .strip_prefix("Bot ")
+            .or_else(|| value.strip_prefix("bot "))
+        {
             let bot_id = extract_bot_id(token).unwrap_or_default();
             Self::Bot { bot_id }
-        } else if let Some(token) =
-            value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer "))
+        } else if let Some(token) = value
+            .strip_prefix("Bearer ")
+            .or_else(|| value.strip_prefix("bearer "))
         {
             let bot_id = extract_bot_id(token).unwrap_or_default();
             Self::Bearer { bot_id }
@@ -28,6 +38,7 @@ impl Auth {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn rate_limit_key(&self) -> Option<&str> {
         match self {
             Self::Bot { bot_id } | Self::Bearer { bot_id } => Some(bot_id),

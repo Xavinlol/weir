@@ -41,12 +41,7 @@ impl GlobalRateLimit {
                 let new_state = pack(now, 1);
                 if self
                     .state
-                    .compare_exchange_weak(
-                        current,
-                        new_state,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
+                    .compare_exchange_weak(current, new_state, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
                 {
                     return true;
@@ -55,12 +50,7 @@ impl GlobalRateLimit {
                 let new_state = pack(window_ms, count + 1);
                 if self
                     .state
-                    .compare_exchange_weak(
-                        current,
-                        new_state,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
+                    .compare_exchange_weak(current, new_state, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
                 {
                     return true;

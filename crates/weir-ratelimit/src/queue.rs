@@ -23,9 +23,7 @@ impl RequestQueue {
 
     /// Wait for the bucket to become available. Returns `false` on timeout.
     pub async fn wait(&self) -> bool {
-        timeout(self.timeout, self.notify.notified())
-            .await
-            .is_ok()
+        timeout(self.timeout, self.notify.notified()).await.is_ok()
     }
 
     /// Wake one waiting request.
@@ -54,9 +52,7 @@ mod tests {
         let queue = std::sync::Arc::new(RequestQueue::new(5000));
         let queue2 = queue.clone();
 
-        let handle = tokio::spawn(async move {
-            queue2.wait().await
-        });
+        let handle = tokio::spawn(async move { queue2.wait().await });
 
         // Small delay to ensure the waiter is registered
         tokio::time::sleep(Duration::from_millis(10)).await;

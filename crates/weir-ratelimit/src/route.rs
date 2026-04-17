@@ -99,7 +99,11 @@ impl BucketKey {
 impl fmt::Display for BucketKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.sub_resource {
-            Some(sub) => write!(f, "{}:{}/{}/{sub}", self.method, self.resource, self.major_id),
+            Some(sub) => write!(
+                f,
+                "{}:{}/{}/{sub}",
+                self.method, self.resource, self.major_id
+            ),
             None => write!(f, "{}:{}/{}", self.method, self.resource, self.major_id),
         }
     }
@@ -217,15 +221,19 @@ mod tests {
 
     #[test]
     fn parse_reaction_modify() {
-        let key =
-            parse_bucket_key("PUT", "/api/v10/channels/123/messages/456/reactions/\u{1f525}/@me");
+        let key = parse_bucket_key(
+            "PUT",
+            "/api/v10/channels/123/messages/456/reactions/\u{1f525}/@me",
+        );
         assert_eq!(key.sub_resource, Some(SubResource::ReactionsModify));
     }
 
     #[test]
     fn parse_reaction_query() {
-        let key =
-            parse_bucket_key("GET", "/api/v10/channels/123/messages/456/reactions/\u{1f525}");
+        let key = parse_bucket_key(
+            "GET",
+            "/api/v10/channels/123/messages/456/reactions/\u{1f525}",
+        );
         assert_eq!(key.sub_resource, Some(SubResource::Reactions));
     }
 

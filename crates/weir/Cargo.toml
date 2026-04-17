@@ -3,7 +3,6 @@ name = "weir"
 description = "A high-performance Discord REST API proxy with built-in rate limiting"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

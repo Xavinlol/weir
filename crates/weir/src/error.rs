@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+#[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum WeirError {
     #[error("failed to forward request to Discord: {0}")]

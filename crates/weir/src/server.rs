@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::Router;
 use axum::routing::get;
+use axum::Router;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
@@ -44,7 +44,9 @@ pub async fn run(config: Config) -> Result<()> {
         .user_agent(format!("Weir/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
 
-    let overrides = config.ratelimit.overrides
+    let overrides = config
+        .ratelimit
+        .overrides
         .iter()
         .map(|(k, v)| (k.clone(), v.global_limit))
         .collect();

@@ -178,10 +178,15 @@ impl RateLimitManager {
                 if let Some(state) = self.tokens.get(id) {
                     return Arc::clone(state.value());
                 }
-                let limit = self.overrides.get(id).copied().unwrap_or(self.global_limit_default);
-                let entry = self.tokens.entry(id.clone()).or_insert_with(|| {
-                    Arc::new(TokenState::new(limit))
-                });
+                let limit = self
+                    .overrides
+                    .get(id)
+                    .copied()
+                    .unwrap_or(self.global_limit_default);
+                let entry = self
+                    .tokens
+                    .entry(id.clone())
+                    .or_insert_with(|| Arc::new(TokenState::new(limit)));
                 Arc::clone(entry.value())
             }
             AuthType::Webhook => Arc::clone(&self.ip_state),
@@ -266,7 +271,9 @@ impl RateLimitManager {
         }
 
         let before = self.ip_state.buckets.len();
-        self.ip_state.buckets.retain(|_, e| !e.bucket.is_expired(ttl));
+        self.ip_state
+            .buckets
+            .retain(|_, e| !e.bucket.is_expired(ttl));
         evicted += before.saturating_sub(self.ip_state.buckets.len()) as u64;
 
         evicted
@@ -332,7 +339,9 @@ impl RateLimitManager {
         };
         let entry = state.buckets.get(&hash_key).map(|r| Arc::clone(r.value()));
         if let Some(entry) = entry {
-            entry.bucket.update(0, entry.bucket.limit(), retry_after.as_secs_f64());
+            entry
+                .bucket
+                .update(0, entry.bucket.limit(), retry_after.as_secs_f64());
         }
     }
 
@@ -346,7 +355,7 @@ impl RateLimitManager {
         has_via: bool,
     ) -> HealthEvent {
         if status == 403 && !has_via {
-            self.cloudflare.set_blocked(Duration::from_secs(60));
+            self.cloudflare.set_blocked(Duration::from_mins(1));
             return HealthEvent::CloudflareBanned;
         }
 
@@ -355,7 +364,8 @@ impl RateLimitManager {
                 let state = self.get_state(auth);
                 if (200..300).contains(&status) {
                     state.health.report_success();
-                } else if has_via && (status == 401 || status == 403)
+                } else if has_via
+                    && (status == 401 || status == 403)
                     && state.health.report_error(self.token_error_threshold)
                 {
                     return HealthEvent::TokenDisabled;
@@ -363,7 +373,10 @@ impl RateLimitManager {
             }
             AuthType::Webhook => {
                 if status == 404 {
-                    if self.webhook_health.report_404(&key.major_id, self.webhook_404_threshold) {
+                    if self
+                        .webhook_health
+                        .report_404(&key.major_id, self.webhook_404_threshold)
+                    {
                         return HealthEvent::WebhookDisabled;
                     }
                 } else {
@@ -413,7 +426,7 @@ mod tests {
         let cf = CloudflareState::new();
         assert!(cf.is_blocked().is_none());
 
-        cf.set_blocked(Duration::from_secs(60));
+        cf.set_blocked(Duration::from_mins(1));
         assert!(cf.is_blocked().is_some());
     }
 
@@ -429,7 +442,10 @@ mod tests {
 
     #[tokio::test]
     async fn global_limit_enforced() {
-        let manager = RateLimitManager::new(ManagerConfig { global_limit_default: 2, ..Default::default() });
+        let manager = RateLimitManager::new(ManagerConfig {
+            global_limit_default: 2,
+            ..Default::default()
+        });
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -449,7 +465,10 @@ mod tests {
 
     #[tokio::test]
     async fn interaction_skips_global() {
-        let manager = RateLimitManager::new(ManagerConfig { global_limit_default: 1, ..Default::default() });
+        let manager = RateLimitManager::new(ManagerConfig {
+            global_limit_default: 1,
+            ..Default::default()
+        });
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("POST", Resource::Interactions, "!");
 
@@ -471,9 +490,7 @@ mod tests {
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
-        manager
-            .cloudflare
-            .set_blocked(Duration::from_secs(60));
+        manager.cloudflare.set_blocked(Duration::from_mins(1));
 
         let result = manager.acquire(&auth, &key, false).await;
         assert!(matches!(result, AcquireResult::CloudflareLimited { .. }));
@@ -481,7 +498,10 @@ mod tests {
 
     #[tokio::test]
     async fn bucket_learning_and_enforcement() {
-        let manager = RateLimitManager::new(ManagerConfig { queue_timeout_ms: 100, ..Default::default() });
+        let manager = RateLimitManager::new(ManagerConfig {
+            queue_timeout_ms: 100,
+            ..Default::default()
+        });
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -510,7 +530,10 @@ mod tests {
 
     #[tokio::test]
     async fn separate_tokens_separate_state() {
-        let manager = RateLimitManager::new(ManagerConfig { global_limit_default: 1, ..Default::default() });
+        let manager = RateLimitManager::new(ManagerConfig {
+            global_limit_default: 1,
+            ..Default::default()
+        });
         let auth1 = AuthType::Bot("111".to_owned());
         let auth2 = AuthType::Bot("222".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
@@ -534,7 +557,10 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_uses_ip_state() {
-        let manager = RateLimitManager::new(ManagerConfig { global_limit_default: 1, ..Default::default() });
+        let manager = RateLimitManager::new(ManagerConfig {
+            global_limit_default: 1,
+            ..Default::default()
+        });
         let auth = AuthType::Webhook;
         let key = test_key("POST", Resource::Webhooks, "789");
 
@@ -599,7 +625,7 @@ mod tests {
         let state = manager.get_state(&auth);
         assert_eq!(state.buckets.len(), 1);
 
-        let evicted = manager.cleanup_expired(Duration::from_secs(3600));
+        let evicted = manager.cleanup_expired(Duration::from_hours(1));
         assert_eq!(evicted, 0);
         assert_eq!(state.buckets.len(), 1);
     }
@@ -647,7 +673,10 @@ mod tests {
         let key = test_key("GET", Resource::Channels, "456");
 
         manager.report_response(&auth, &key, 401, true);
-        assert_eq!(manager.report_response(&auth, &key, 401, true), HealthEvent::TokenDisabled);
+        assert_eq!(
+            manager.report_response(&auth, &key, 401, true),
+            HealthEvent::TokenDisabled
+        );
 
         assert!(matches!(
             manager.acquire(&auth, &key, false).await,
@@ -665,7 +694,10 @@ mod tests {
         let key = test_key("POST", Resource::Webhooks, "dead_hook");
 
         manager.report_response(&auth, &key, 404, true);
-        assert_eq!(manager.report_response(&auth, &key, 404, true), HealthEvent::WebhookDisabled);
+        assert_eq!(
+            manager.report_response(&auth, &key, 404, true),
+            HealthEvent::WebhookDisabled
+        );
 
         assert!(matches!(
             manager.acquire(&auth, &key, false).await,
@@ -679,7 +711,10 @@ mod tests {
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
-        assert_eq!(manager.report_response(&auth, &key, 403, false), HealthEvent::CloudflareBanned);
+        assert_eq!(
+            manager.report_response(&auth, &key, 403, false),
+            HealthEvent::CloudflareBanned
+        );
         assert!(manager.cloudflare.is_blocked().is_some());
     }
 
@@ -695,7 +730,10 @@ mod tests {
         manager.report_response(&auth, &key, 401, true);
         manager.report_response(&auth, &key, 401, true);
         manager.report_response(&auth, &key, 200, true);
-        assert_eq!(manager.report_response(&auth, &key, 401, true), HealthEvent::None);
+        assert_eq!(
+            manager.report_response(&auth, &key, 401, true),
+            HealthEvent::None
+        );
     }
 
     #[tokio::test]

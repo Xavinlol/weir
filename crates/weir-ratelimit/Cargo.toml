@@ -3,7 +3,6 @@ name = "weir-ratelimit"
 description = "Rate limit engine for the Weir Discord REST API proxy"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
