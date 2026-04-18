@@ -1,24 +1,51 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
+
+#[allow(clippy::cast_possible_truncation)]
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 /// Tracks health of a bot/bearer token via consecutive error streaks.
 pub struct TokenHealth {
     error_streak: AtomicU32,
     disabled: AtomicBool,
+    disabled_at: AtomicU64,
+    cooldown_ms: u64,
 }
 
 impl TokenHealth {
     pub fn new() -> Self {
+        Self::with_cooldown(Duration::from_mins(5))
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn with_cooldown(cooldown: Duration) -> Self {
         Self {
             error_streak: AtomicU32::new(0),
             disabled: AtomicBool::new(false),
+            disabled_at: AtomicU64::new(0),
+            cooldown_ms: cooldown.as_millis() as u64,
         }
     }
 
     #[inline]
     pub fn is_disabled(&self) -> bool {
-        self.disabled.load(Ordering::Acquire)
+        if !self.disabled.load(Ordering::Acquire) {
+            return false;
+        }
+        // Auto-recover after cooldown
+        let at = self.disabled_at.load(Ordering::Acquire);
+        if at > 0 && now_millis().saturating_sub(at) >= self.cooldown_ms {
+            self.enable();
+            return false;
+        }
+        true
     }
 
     pub fn report_success(&self) {
@@ -29,17 +56,21 @@ impl TokenHealth {
     /// one that flipped `disabled` from false to true (threshold reached).
     pub fn report_error(&self, threshold: u32) -> bool {
         let prev = self.error_streak.fetch_add(1, Ordering::AcqRel);
-        if prev + 1 >= threshold {
-            self.disabled
+        if prev + 1 >= threshold
+            && self
+                .disabled
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
-        } else {
-            false
+        {
+            self.disabled_at.store(now_millis(), Ordering::Release);
+            return true;
         }
+        false
     }
 
     pub fn enable(&self) {
         self.error_streak.store(0, Ordering::Relaxed);
+        self.disabled_at.store(0, Ordering::Relaxed);
         self.disabled.store(false, Ordering::Release);
     }
 }
@@ -53,25 +84,44 @@ impl Default for TokenHealth {
 struct WebhookEntry {
     consecutive_404s: AtomicU32,
     disabled: AtomicBool,
+    disabled_at: AtomicU64,
 }
 
 /// Tracks health of individual webhooks via consecutive 404 streaks.
 pub struct WebhookHealth {
     entries: DashMap<String, WebhookEntry>,
+    cooldown_ms: u64,
 }
 
 impl WebhookHealth {
     pub fn new() -> Self {
+        Self::with_cooldown(Duration::from_mins(5))
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn with_cooldown(cooldown: Duration) -> Self {
         Self {
             entries: DashMap::new(),
+            cooldown_ms: cooldown.as_millis() as u64,
         }
     }
 
     #[inline]
     pub fn is_disabled(&self, webhook_id: &str) -> bool {
-        self.entries
-            .get(webhook_id)
-            .is_some_and(|e| e.disabled.load(Ordering::Acquire))
+        if let Some(e) = self.entries.get(webhook_id) {
+            if !e.disabled.load(Ordering::Acquire) {
+                return false;
+            }
+            // Auto-recover after cooldown
+            let at = e.disabled_at.load(Ordering::Acquire);
+            if at > 0 && now_millis().saturating_sub(at) >= self.cooldown_ms {
+                drop(e); // Release DashMap ref before mutating
+                self.enable(webhook_id);
+                return false;
+            }
+            return true;
+        }
+        false
     }
 
     /// Increment the 404 streak. Returns `true` only if this call was the
@@ -83,16 +133,19 @@ impl WebhookHealth {
             .or_insert_with(|| WebhookEntry {
                 consecutive_404s: AtomicU32::new(0),
                 disabled: AtomicBool::new(false),
+                disabled_at: AtomicU64::new(0),
             });
         let prev = entry.consecutive_404s.fetch_add(1, Ordering::AcqRel);
-        if prev + 1 >= threshold {
-            entry
+        if prev + 1 >= threshold
+            && entry
                 .disabled
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
-        } else {
-            false
+        {
+            entry.disabled_at.store(now_millis(), Ordering::Release);
+            return true;
         }
+        false
     }
 
     pub fn report_success(&self, webhook_id: &str) {
@@ -105,6 +158,7 @@ impl WebhookHealth {
     pub fn enable(&self, webhook_id: &str) {
         if let Some(entry) = self.entries.get(webhook_id) {
             entry.consecutive_404s.store(0, Ordering::Relaxed);
+            entry.disabled_at.store(0, Ordering::Relaxed);
             entry.disabled.store(false, Ordering::Release);
         }
     }
