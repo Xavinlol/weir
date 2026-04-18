@@ -1,3 +1,12 @@
+## [0.1.9](https://github.com/Xavinlol/weir/compare/v0.1.8...v0.1.9) (2026-04-18)
+
+
+### Bug Fixes
+
+* **ratelimit:** always try acquire after queue wait ([#12](https://github.com/Xavinlol/weir/issues/12)) ([f68680c](https://github.com/Xavinlol/weir/commit/f68680cad26e2c6f0343721ec6dee25ca9d3cbb4))
+
+
+
 ## [0.1.8](https://github.com/Xavinlol/weir/compare/v0.1.7...v0.1.8) (2026-04-18)
 
 
@@ -32,15 +41,6 @@
 ### Bug Fixes
 
 * code review fixes and dead code cleanup ([#7](https://github.com/Xavinlol/weir/issues/7)) ([135cbc8](https://github.com/Xavinlol/weir/commit/135cbc82de3bf83b63263cce9f87fb76c88d82d4))
-
-
-
-## [0.1.4](https://github.com/Xavinlol/weir/compare/v0.1.3...v0.1.4) (2026-04-18)
-
-
-### Bug Fixes
-
-* **metrics:** gauge emission and route label fixes ([#5](https://github.com/Xavinlol/weir/issues/5)) ([84989c4](https://github.com/Xavinlol/weir/commit/84989c4ae43d6ad78fe0a433c3538fcfec40cbf3))
 
 
 
