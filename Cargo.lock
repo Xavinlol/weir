@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "weir"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -1819,7 +1819,7 @@ dependencies = [
 
 [[package]]
 name = "weir-metrics"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "weir-ratelimit"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "dashmap",
  "tokio",
