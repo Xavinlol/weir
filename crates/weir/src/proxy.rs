@@ -490,8 +490,13 @@ fn metrics_route(path: &str) -> String {
         }
         result.push('/');
 
-        if segment.starts_with('@') {
-            result.push_str(segment);
+        if segment.starts_with('@') || segment.starts_with("%40") {
+            result.push('@');
+            let name = segment
+                .strip_prefix('@')
+                .or_else(|| segment.strip_prefix("%40"))
+                .unwrap_or(segment);
+            result.push_str(name);
         } else if !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit()) {
             result.push_str("{id}");
         } else if segment.len() >= 60 {
@@ -650,5 +655,15 @@ mod tests {
     #[test]
     fn metrics_route_api_non_version_v_prefix() {
         assert_eq!(metrics_route("/api/voice/regions"), "/voice/regions");
+    }
+
+    #[test]
+    fn metrics_route_url_encoded_at_original() {
+        let token = "abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+        let path = format!("/api/v10/webhooks/123456789012345678/{token}/messages/%40original");
+        assert_eq!(
+            metrics_route(&path),
+            "/webhooks/{id}/{token}/messages/@original"
+        );
     }
 }
