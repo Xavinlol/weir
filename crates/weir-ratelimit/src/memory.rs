@@ -260,21 +260,42 @@ impl RateLimitManager {
     }
 
     /// Evict buckets that haven't been used within the given TTL.
-    /// Returns the number of evicted entries.
+    /// Also prunes stale `route_map` entries and empty token states.
+    /// Returns the number of evicted bucket entries.
     pub fn cleanup_expired(&self, ttl: Duration) -> u64 {
         let mut evicted = 0u64;
-        for entry in &self.tokens {
-            let state = entry.value();
+
+        // Clean buckets and route_map for each token
+        self.tokens.retain(|_, state| {
             let before = state.buckets.len();
             state.buckets.retain(|_, e| !e.bucket.is_expired(ttl));
             evicted += before.saturating_sub(state.buckets.len()) as u64;
-        }
 
+            // Prune route_map entries whose bucket hash is no longer present
+            state.route_map.retain(|_, hash| {
+                state
+                    .buckets
+                    .iter()
+                    .any(|e| e.key().starts_with(hash.as_str()))
+            });
+
+            // Keep the token state if it still has buckets or routes
+            !state.buckets.is_empty() || !state.route_map.is_empty()
+        });
+
+        // Clean IP-based (webhook) state
         let before = self.ip_state.buckets.len();
         self.ip_state
             .buckets
             .retain(|_, e| !e.bucket.is_expired(ttl));
         evicted += before.saturating_sub(self.ip_state.buckets.len()) as u64;
+
+        self.ip_state.route_map.retain(|_, hash| {
+            self.ip_state
+                .buckets
+                .iter()
+                .any(|e| e.key().starts_with(hash.as_str()))
+        });
 
         evicted
     }
