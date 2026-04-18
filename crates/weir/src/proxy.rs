@@ -222,6 +222,7 @@ pub async fn handle(
     // Forensic dump on 401 so we can debug auth failures
     if status == StatusCode::UNAUTHORIZED {
         let resp_body = String::from_utf8_lossy(&body_bytes);
+        let safe_url = redact_url_tokens(&target_url);
         let req_headers: Vec<String> = parts
             .headers
             .iter()
@@ -241,7 +242,7 @@ pub async fn handle(
             .collect();
         warn!(
             method = %method_str,
-            url = %target_url,
+            url = %safe_url,
             auth_type = %auth_label,
             response = %resp_body,
             headers = ?req_headers,
@@ -459,8 +460,44 @@ fn build_target_url(uri: &axum::http::Uri) -> String {
 fn is_hop_by_hop(name: &str) -> bool {
     matches!(
         name,
-        "host" | "connection" | "transfer-encoding" | "content-length"
+        "host"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "content-length"
     )
+}
+
+/// Redact long path segments (tokens) from URLs before logging.
+fn redact_url_tokens(url: &str) -> String {
+    // Split at the path portion after the host
+    let (prefix, path_and_query) = if let Some(pos) = url.find("discord.com") {
+        let host_end = pos + "discord.com".len();
+        (&url[..host_end], &url[host_end..])
+    } else {
+        return url.to_owned();
+    };
+
+    let (path, query) = match path_and_query.find('?') {
+        Some(pos) => (&path_and_query[..pos], Some(&path_and_query[pos..])),
+        None => (path_and_query, None),
+    };
+
+    let redacted_path: String = path
+        .split('/')
+        .map(|seg| if seg.len() >= 60 { "<redacted>" } else { seg })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    match query {
+        Some(q) => format!("{prefix}{redacted_path}{q}"),
+        None => format!("{prefix}{redacted_path}"),
+    }
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<Body> {
