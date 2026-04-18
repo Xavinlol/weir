@@ -35,7 +35,7 @@ pub async fn handle(
     debug!(%method, %path, "proxying request");
 
     let request_start = Instant::now();
-    let auth_type = extract_auth_type(&parts.headers, path);
+    let auth_type = extract_auth_type(&parts.headers);
     let bucket_key = parse_bucket_key(&method_str, path);
     let is_interaction = bucket_key.is_interaction();
 
@@ -75,7 +75,7 @@ pub async fn handle(
                 &route_label,
                 request_start,
             );
-            return Err(rate_limit_response(retry_after));
+            return Err(rate_limit_response(retry_after, false));
         }
         AcquireResult::GlobalLimited { retry_after } => {
             debug!("global rate limited");
@@ -88,7 +88,7 @@ pub async fn handle(
                 &route_label,
                 request_start,
             );
-            return Err(rate_limit_response(retry_after));
+            return Err(rate_limit_response(retry_after, true));
         }
         AcquireResult::BucketLimited { retry_after } => {
             debug!(bucket = %bucket_key, "bucket rate limited");
@@ -101,7 +101,7 @@ pub async fn handle(
                 &route_label,
                 request_start,
             );
-            return Err(rate_limit_response(retry_after));
+            return Err(rate_limit_response(retry_after, false));
         }
         AcquireResult::QueueTimeout => {
             debug!(bucket = %bucket_key, "queue timeout");
@@ -114,7 +114,7 @@ pub async fn handle(
                 &route_label,
                 request_start,
             );
-            return Err(rate_limit_response(Duration::from_secs(1)));
+            return Err(rate_limit_response(Duration::from_secs(1), false));
         }
         AcquireResult::TokenDisabled => {
             warn!("token disabled due to consecutive errors");
@@ -222,6 +222,7 @@ pub async fn handle(
     // Forensic dump on 401 so we can debug auth failures
     if status == StatusCode::UNAUTHORIZED {
         let resp_body = String::from_utf8_lossy(&body_bytes);
+        let safe_url = redact_url_tokens(&target_url);
         let req_headers: Vec<String> = parts
             .headers
             .iter()
@@ -241,7 +242,7 @@ pub async fn handle(
             .collect();
         warn!(
             method = %method_str,
-            url = %target_url,
+            url = %safe_url,
             auth_type = %auth_label,
             response = %resp_body,
             headers = ?req_headers,
@@ -360,37 +361,20 @@ fn record_request(
     .record(start.elapsed().as_secs_f64());
 }
 
-fn extract_auth_type(headers: &axum::http::HeaderMap, _path: &str) -> AuthType {
+fn extract_auth_type(headers: &axum::http::HeaderMap) -> AuthType {
     if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         let auth = Auth::from_header(auth_header);
         match auth {
             Auth::Bot { bot_id } if !bot_id.is_empty() => AuthType::Bot(bot_id),
             Auth::Bearer { bot_id } if !bot_id.is_empty() => AuthType::Bearer(bot_id),
-            _ => AuthType::Webhook,
+            Auth::Bot { .. } | Auth::Bearer { .. } => {
+                warn!("auth header present but bot_id extraction failed, treating as webhook");
+                AuthType::Webhook
+            }
+            Auth::None => AuthType::Webhook,
         }
     } else {
         AuthType::Webhook
-    }
-}
-
-/// Check if path matches /webhooks/{id}/{token} or /api/v{N}/webhooks/{id}/{token}.
-#[allow(dead_code)]
-fn is_webhook_path(path: &str) -> bool {
-    let path = path.trim_start_matches('/');
-    let path = if let Some(rest) = path.strip_prefix("api/") {
-        if let Some(pos) = rest.find('/') {
-            &rest[pos + 1..]
-        } else {
-            return false;
-        }
-    } else {
-        path
-    };
-
-    if let Some(rest) = path.strip_prefix("webhooks/") {
-        rest.contains('/')
-    } else {
-        false
     }
 }
 
@@ -459,8 +443,44 @@ fn build_target_url(uri: &axum::http::Uri) -> String {
 fn is_hop_by_hop(name: &str) -> bool {
     matches!(
         name,
-        "host" | "connection" | "transfer-encoding" | "content-length"
+        "host"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "content-length"
     )
+}
+
+/// Redact long path segments (tokens) from URLs before logging.
+fn redact_url_tokens(url: &str) -> String {
+    // Split at the path portion after the host
+    let (prefix, path_and_query) = if let Some(pos) = url.find("discord.com") {
+        let host_end = pos + "discord.com".len();
+        (&url[..host_end], &url[host_end..])
+    } else {
+        return url.to_owned();
+    };
+
+    let (path, query) = match path_and_query.find('?') {
+        Some(pos) => (&path_and_query[..pos], Some(&path_and_query[pos..])),
+        None => (path_and_query, None),
+    };
+
+    let redacted_path: String = path
+        .split('/')
+        .map(|seg| if seg.len() >= 60 { "<redacted>" } else { seg })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    match query {
+        Some(q) => format!("{prefix}{redacted_path}{q}"),
+        None => format!("{prefix}{redacted_path}"),
+    }
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<Body> {
@@ -537,12 +557,12 @@ fn is_api_keyword(s: &str) -> bool {
         && bytes.iter().all(|&b| b.is_ascii_lowercase() || b == b'-')
 }
 
-fn rate_limit_response(retry_after: Duration) -> Response<Body> {
+fn rate_limit_response(retry_after: Duration, is_global: bool) -> Response<Body> {
     let retry_secs = retry_after.as_secs_f64();
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let retry_header = format!("{}", retry_secs.ceil() as u64);
     let body = format!(
-        r#"{{"message":"You are being rate limited.","retry_after":{retry_secs:.3},"global":false,"proxy":"weir"}}"#
+        r#"{{"message":"You are being rate limited.","retry_after":{retry_secs:.3},"global":{is_global},"proxy":"weir"}}"#
     );
 
     Response::builder()

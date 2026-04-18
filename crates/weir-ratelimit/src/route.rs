@@ -151,9 +151,16 @@ pub fn parse_bucket_key(method: &str, path: &str) -> BucketKey {
 #[inline]
 fn strip_api_prefix(path: &str) -> &str {
     if let Some(rest) = path.strip_prefix("api/") {
+        // Only strip the version segment if it starts with v{digit}
         if let Some(pos) = rest.find('/') {
-            return &rest[pos + 1..];
+            let segment = &rest[..pos];
+            if segment.starts_with('v') && segment.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+            {
+                return &rest[pos + 1..];
+            }
         }
+        // No version segment — strip just the "api/" prefix
+        return rest;
     }
     path
 }
@@ -249,6 +256,15 @@ mod tests {
         let key = parse_bucket_key("GET", "/channels/123/messages");
         assert_eq!(key.resource, Resource::Channels);
         assert_eq!(key.major_id, "123");
+    }
+
+    #[test]
+    fn handles_api_without_version() {
+        // /api/channels/123/messages should NOT strip "channels" as a version segment
+        let key = parse_bucket_key("GET", "/api/channels/123/messages");
+        assert_eq!(key.resource, Resource::Channels);
+        assert_eq!(key.major_id, "123");
+        assert_eq!(key.sub_resource, Some(SubResource::Messages));
     }
 
     #[test]

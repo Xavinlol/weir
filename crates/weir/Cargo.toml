@@ -28,7 +28,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 clap.workspace = true
-thiserror.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 metrics.workspace = true

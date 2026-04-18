@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "weir"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -1772,7 +1772,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
  "toml",
  "tracing",
@@ -1783,7 +1782,7 @@ dependencies = [
 
 [[package]]
 name = "weir-metrics"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
@@ -1791,7 +1790,7 @@ dependencies = [
 
 [[package]]
 name = "weir-ratelimit"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "dashmap",
  "tokio",
