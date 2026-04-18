@@ -1,3 +1,13 @@
+## [0.1.7](https://github.com/Xavinlol/weir/compare/v0.1.6...v0.1.7) (2026-04-18)
+
+
+### Performance Improvements
+
+* **proxy:** eliminate redundant string allocations in metrics recording ([36aa38d](https://github.com/Xavinlol/weir/commit/36aa38d017116eb7b4491c231ab83f8196422626))
+* **proxy:** use Cow for method and status labels to avoid allocations ([8a3c87b](https://github.com/Xavinlol/weir/commit/8a3c87b913a2b8af4841a28f911f1d06a7fc5376))
+
+
+
 ## [0.1.6](https://github.com/Xavinlol/weir/compare/v0.1.5...v0.1.6) (2026-04-18)
 
 
@@ -31,15 +41,6 @@
 ### Features
 
 * **metrics:** descriptive route labels ([eacc90e](https://github.com/Xavinlol/weir/commit/eacc90e935f7217d26d6e3dcf1a249910d9b2e70))
-
-
-
-## [0.1.2](https://github.com/Xavinlol/weir/compare/v0.1.1...v0.1.2) (2026-04-18)
-
-
-### Features
-
-* **proxy:** add 401 forensic logging ([#3](https://github.com/Xavinlol/weir/issues/3)) ([b5c52b2](https://github.com/Xavinlol/weir/commit/b5c52b2319b703bd3889e99e24a14b542d0e738d))
 
 
 
