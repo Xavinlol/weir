@@ -48,12 +48,15 @@ pub async fn handle(
 
     #[allow(clippy::cast_precision_loss)]
     gauge!("weir_active_buckets").set(state.rate_limiter.bucket_count() as f64);
-    gauge!("weir_invalid_request_count").set(f64::from(state.rate_limiter.invalid_requests.count()));
-    gauge!("weir_cloudflare_blocked").set(if state.rate_limiter.cloudflare.is_blocked().is_some() {
-        1.0
-    } else {
-        0.0
-    });
+    gauge!("weir_invalid_request_count")
+        .set(f64::from(state.rate_limiter.invalid_requests.count()));
+    gauge!("weir_cloudflare_blocked").set(
+        if state.rate_limiter.cloudflare.is_blocked().is_some() {
+            1.0
+        } else {
+            0.0
+        },
+    );
 
     match state
         .rate_limiter
