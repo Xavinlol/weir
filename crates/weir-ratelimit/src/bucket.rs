@@ -3,10 +3,23 @@ use std::time::Duration;
 
 use crate::elapsed_millis;
 
+/// Pack `remaining` (low 32) and `epoch` (high 32) into a single `u64`.
+#[inline]
+const fn pack_state(remaining: u32, epoch: u32) -> u64 {
+    ((epoch as u64) << 32) | (remaining as u64)
+}
+
+/// Unpack a `u64` into `(remaining, epoch)`.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+const fn unpack_state(state: u64) -> (u32, u32) {
+    (state as u32, (state >> 32) as u32)
+}
+
 #[derive(Debug)]
 pub struct Bucket {
     pub hash: String,
-    remaining: AtomicU32,
+    state: AtomicU64,
     limit: AtomicU32,
     reset_at_ms: AtomicU64,
     last_used_ms: AtomicU64,
@@ -16,7 +29,7 @@ impl Bucket {
     pub fn new(hash: String) -> Self {
         Self {
             hash,
-            remaining: AtomicU32::new(1),
+            state: AtomicU64::new(pack_state(1, 0)),
             limit: AtomicU32::new(1),
             reset_at_ms: AtomicU64::new(u64::MAX),
             last_used_ms: AtomicU64::new(elapsed_millis()),
@@ -35,24 +48,33 @@ impl Bucket {
                 .compare_exchange(reset_at, u64::MAX, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
         {
+            let observed = self.state.load(Ordering::Acquire);
+            let (_, epoch) = unpack_state(observed);
             let limit = self.limit.load(Ordering::Relaxed);
-            self.remaining.store(limit, Ordering::Release);
+            let _ = self.state.compare_exchange(
+                observed,
+                pack_state(limit, epoch.wrapping_add(1)),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
         }
 
-        loop {
-            let current = self.remaining.load(Ordering::Acquire);
-            if current == 0 {
-                return false;
-            }
-            if self
-                .remaining
-                .compare_exchange_weak(current, current - 1, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.last_used_ms.store(now, Ordering::Relaxed);
-                return true;
-            }
+        let acquired = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let (remaining, epoch) = unpack_state(current);
+                if remaining == 0 {
+                    None
+                } else {
+                    Some(pack_state(remaining - 1, epoch))
+                }
+            })
+            .is_ok();
+
+        if acquired {
+            self.last_used_ms.store(now, Ordering::Relaxed);
         }
+        acquired
     }
 
     /// Update bucket state from Discord response headers.
@@ -61,7 +83,12 @@ impl Bucket {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let reset_at = now + (reset_after_secs * 1000.0) as u64;
         self.limit.store(limit, Ordering::Release);
-        self.remaining.store(remaining, Ordering::Release);
+        let _ = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let (_, epoch) = unpack_state(current);
+                Some(pack_state(remaining, epoch.wrapping_add(1)))
+            });
         self.reset_at_ms.store(reset_at, Ordering::Release);
         self.last_used_ms.store(now, Ordering::Relaxed);
     }
