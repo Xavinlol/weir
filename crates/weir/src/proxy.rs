@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -29,7 +30,16 @@ pub async fn handle(
     let method = parts.method;
     let uri = parts.uri;
     let path = uri.path();
-    let method_str = method.as_str().to_owned();
+    let method_str: Cow<'static, str> = match method.as_str() {
+        "GET" => Cow::Borrowed("GET"),
+        "POST" => Cow::Borrowed("POST"),
+        "PUT" => Cow::Borrowed("PUT"),
+        "PATCH" => Cow::Borrowed("PATCH"),
+        "DELETE" => Cow::Borrowed("DELETE"),
+        "HEAD" => Cow::Borrowed("HEAD"),
+        "OPTIONS" => Cow::Borrowed("OPTIONS"),
+        other => Cow::Owned(other.to_owned()),
+    };
 
     debug!(%method, %path, "proxying request");
 
@@ -68,7 +78,7 @@ pub async fn handle(
             counter!("weir_rate_limited_total", "kind" => "cloudflare").increment(1);
             record_request(
                 method_str,
-                "429".to_owned(),
+                Cow::Borrowed("429"),
                 auth_label,
                 bot_id,
                 route_label,
@@ -81,7 +91,7 @@ pub async fn handle(
             counter!("weir_rate_limited_total", "kind" => "global").increment(1);
             record_request(
                 method_str,
-                "429".to_owned(),
+                Cow::Borrowed("429"),
                 auth_label,
                 bot_id,
                 route_label,
@@ -94,7 +104,7 @@ pub async fn handle(
             counter!("weir_rate_limited_total", "kind" => "bucket").increment(1);
             record_request(
                 method_str,
-                "429".to_owned(),
+                Cow::Borrowed("429"),
                 auth_label,
                 bot_id,
                 route_label,
@@ -107,7 +117,7 @@ pub async fn handle(
             counter!("weir_rate_limited_total", "kind" => "queue_timeout").increment(1);
             record_request(
                 method_str,
-                "429".to_owned(),
+                Cow::Borrowed("429"),
                 auth_label,
                 bot_id,
                 route_label,
@@ -120,7 +130,7 @@ pub async fn handle(
             counter!("weir_rate_limited_total", "kind" => "token_disabled").increment(1);
             record_request(
                 method_str,
-                "403".to_owned(),
+                Cow::Borrowed("403"),
                 auth_label,
                 bot_id,
                 route_label,
@@ -133,7 +143,7 @@ pub async fn handle(
             counter!("weir_rate_limited_total", "kind" => "webhook_disabled").increment(1);
             record_request(
                 method_str,
-                "404".to_owned(),
+                Cow::Borrowed("404"),
                 auth_label,
                 bot_id,
                 route_label,
@@ -154,7 +164,7 @@ pub async fn handle(
             warn!(error = %e, "failed to build outgoing request");
             record_request(
                 method_str.clone(),
-                "500".to_owned(),
+                Cow::Borrowed("500"),
                 auth_label,
                 bot_id,
                 route_label.clone(),
@@ -174,7 +184,7 @@ pub async fn handle(
         warn!(error = %e, "discord request failed");
         record_request(
             method_str.clone(),
-            "502".to_owned(),
+            Cow::Borrowed("502"),
             auth_label,
             bot_id,
             route_label.clone(),
@@ -233,7 +243,7 @@ pub async fn handle(
             warn!(error = %e, "failed to read discord response body");
             record_request(
                 method_str.clone(),
-                "502".to_owned(),
+                Cow::Borrowed("502"),
                 auth_label,
                 bot_id,
                 route_label.clone(),
@@ -301,22 +311,22 @@ pub async fn handle(
         );
     }
 
-    let status_str = status.as_str().to_owned();
+    let status_cow = status_to_cow(status);
+
+    if status.is_server_error()
+        || (status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS)
+    {
+        counter!("weir_discord_errors_total", "status" => status_cow.clone()).increment(1);
+    }
 
     record_request(
         method_str,
-        status_str,
+        status_cow,
         auth_label,
         bot_id,
         route_label,
         request_start,
     );
-
-    if status.is_server_error()
-        || (status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS)
-    {
-        counter!("weir_discord_errors_total", "status" => status.as_str().to_owned()).increment(1);
-    }
 
     let mut builder = Response::builder().status(status.as_u16());
     for (name, value) in &headers {
@@ -334,8 +344,8 @@ pub async fn handle(
 }
 
 fn record_request(
-    method: String,
-    status: String,
+    method: Cow<'static, str>,
+    status: Cow<'static, str>,
     auth_label: &'static str,
     bot_id: &str,
     route: String,
@@ -354,6 +364,25 @@ fn record_request(
         "route" => route
     )
     .record(start.elapsed().as_secs_f64());
+}
+
+#[inline]
+fn status_to_cow(status: StatusCode) -> Cow<'static, str> {
+    match status.as_u16() {
+        200 => Cow::Borrowed("200"),
+        201 => Cow::Borrowed("201"),
+        204 => Cow::Borrowed("204"),
+        304 => Cow::Borrowed("304"),
+        400 => Cow::Borrowed("400"),
+        401 => Cow::Borrowed("401"),
+        403 => Cow::Borrowed("403"),
+        404 => Cow::Borrowed("404"),
+        429 => Cow::Borrowed("429"),
+        500 => Cow::Borrowed("500"),
+        502 => Cow::Borrowed("502"),
+        503 => Cow::Borrowed("503"),
+        _ => Cow::Owned(status.as_str().to_owned()),
+    }
 }
 
 fn extract_auth_type(headers: &axum::http::HeaderMap) -> AuthType {
