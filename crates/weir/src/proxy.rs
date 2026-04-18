@@ -13,7 +13,6 @@ use crate::response::{has_via_header, RateLimitHeaders, RateLimitScope};
 use crate::server::AppState;
 
 const DISCORD_BASE: &str = "https://discord.com";
-const MAX_BODY_SIZE: usize = 25 * 1024 * 1024; // 25 MB
 
 /// Discord 429 response body with `retry_after` field.
 #[derive(serde::Deserialize)]
@@ -146,28 +145,10 @@ pub async fn handle(
 
     let target_url = build_target_url(&uri);
 
-    let body_bytes = axum::body::to_bytes(body, MAX_BODY_SIZE)
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "failed to read request body");
-            record_request(
-                &method_str,
-                "400",
-                auth_label,
-                bot_id,
-                &route_label,
-                request_start,
-            );
-            error_response(
-                StatusCode::BAD_REQUEST,
-                "request body too large or unreadable",
-            )
-        })?;
-
     let mut outgoing = state
         .http_client
         .request(method, &target_url)
-        .body(reqwest::Body::from(body_bytes))
+        .body(reqwest::Body::wrap_stream(body.into_data_stream()))
         .build()
         .map_err(|e| {
             warn!(error = %e, "failed to build outgoing request");
@@ -206,49 +187,6 @@ pub async fn handle(
 
     let status = response.status();
     let headers = response.headers().clone();
-    let body_bytes = response.bytes().await.map_err(|e| {
-        warn!(error = %e, "failed to read discord response body");
-        record_request(
-            &method_str,
-            "502",
-            auth_label,
-            bot_id,
-            &route_label,
-            request_start,
-        );
-        error_response(StatusCode::BAD_GATEWAY, "failed to read response body")
-    })?;
-
-    // Forensic dump on 401 so we can debug auth failures
-    if status == StatusCode::UNAUTHORIZED {
-        let resp_body = String::from_utf8_lossy(&body_bytes);
-        let safe_url = redact_url_tokens(&target_url);
-        let req_headers: Vec<String> = parts
-            .headers
-            .iter()
-            .map(|(name, value)| {
-                let v = if name.as_str() == "authorization" {
-                    let s = value.to_str().unwrap_or("<binary>");
-                    if s.len() > 20 {
-                        format!("{}...{}", &s[..10], &s[s.len() - 5..])
-                    } else {
-                        "<short>".into()
-                    }
-                } else {
-                    value.to_str().unwrap_or("<binary>").to_owned()
-                };
-                format!("{name}: {v}")
-            })
-            .collect();
-        warn!(
-            method = %method_str,
-            url = %safe_url,
-            auth_type = %auth_label,
-            response = %resp_body,
-            headers = ?req_headers,
-            "401 UNAUTHORIZED from Discord"
-        );
-    }
 
     let rl_headers = RateLimitHeaders::from_headers(&headers);
     let has_via = has_via_header(&headers);
@@ -286,16 +224,73 @@ pub async fn handle(
         }
     }
 
-    if status == StatusCode::TOO_MANY_REQUESTS {
-        handle_429(
-            &state,
-            &auth_type,
-            &bucket_key,
-            &rl_headers,
-            has_via,
-            &body_bytes,
-        );
+    // Buffer body only for 401 (forensic log) and 429 (retry_after parsing);
+    // stream everything else directly to the client.
+    let needs_body = status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::UNAUTHORIZED;
+
+    let (response_body, is_429) = if needs_body {
+        let body_bytes = response.bytes().await.map_err(|e| {
+            warn!(error = %e, "failed to read discord response body");
+            record_request(
+                &method_str,
+                "502",
+                auth_label,
+                bot_id,
+                &route_label,
+                request_start,
+            );
+            error_response(StatusCode::BAD_GATEWAY, "failed to read response body")
+        })?;
+
+        if status == StatusCode::UNAUTHORIZED {
+            let resp_body = String::from_utf8_lossy(&body_bytes);
+            let safe_url = redact_url_tokens(&target_url);
+            let req_headers: Vec<String> = parts
+                .headers
+                .iter()
+                .map(|(name, value)| {
+                    let v = if name.as_str() == "authorization" {
+                        let s = value.to_str().unwrap_or("<binary>");
+                        if s.len() > 20 {
+                            format!("{}...{}", &s[..10], &s[s.len() - 5..])
+                        } else {
+                            "<short>".into()
+                        }
+                    } else {
+                        value.to_str().unwrap_or("<binary>").to_owned()
+                    };
+                    format!("{name}: {v}")
+                })
+                .collect();
+            warn!(
+                method = %method_str,
+                url = %safe_url,
+                auth_type = %auth_label,
+                response = %resp_body,
+                headers = ?req_headers,
+                "401 UNAUTHORIZED from Discord"
+            );
+        }
+
+        let is_429 = status == StatusCode::TOO_MANY_REQUESTS;
+        if is_429 {
+            handle_429(
+                &state,
+                &auth_type,
+                &bucket_key,
+                &rl_headers,
+                has_via,
+                &body_bytes,
+            );
+        }
+
+        (Body::from(body_bytes), is_429)
     } else {
+        (Body::from_stream(response.bytes_stream()), false)
+    };
+
+    // handle_429 already calls update_from_response internally
+    if !is_429 {
         state.rate_limiter.update_from_response(
             &auth_type,
             &bucket_key,
@@ -329,7 +324,7 @@ pub async fn handle(
     }
     builder = builder.header("x-sent-by-proxy", "weir");
 
-    builder.body(Body::from(body_bytes)).map_err(|e| {
+    builder.body(response_body).map_err(|e| {
         warn!(error = %e, "failed to build proxy response");
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
