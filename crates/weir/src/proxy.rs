@@ -75,7 +75,7 @@ pub async fn handle(
                 &route_label,
                 request_start,
             );
-            return Err(rate_limit_response(retry_after));
+            return Err(rate_limit_response(retry_after, false));
         }
         AcquireResult::GlobalLimited { retry_after } => {
             debug!("global rate limited");
@@ -88,7 +88,7 @@ pub async fn handle(
                 &route_label,
                 request_start,
             );
-            return Err(rate_limit_response(retry_after));
+            return Err(rate_limit_response(retry_after, true));
         }
         AcquireResult::BucketLimited { retry_after } => {
             debug!(bucket = %bucket_key, "bucket rate limited");
@@ -101,7 +101,7 @@ pub async fn handle(
                 &route_label,
                 request_start,
             );
-            return Err(rate_limit_response(retry_after));
+            return Err(rate_limit_response(retry_after, false));
         }
         AcquireResult::QueueTimeout => {
             debug!(bucket = %bucket_key, "queue timeout");
@@ -114,7 +114,7 @@ pub async fn handle(
                 &route_label,
                 request_start,
             );
-            return Err(rate_limit_response(Duration::from_secs(1)));
+            return Err(rate_limit_response(Duration::from_secs(1), false));
         }
         AcquireResult::TokenDisabled => {
             warn!("token disabled due to consecutive errors");
@@ -537,12 +537,12 @@ fn is_api_keyword(s: &str) -> bool {
         && bytes.iter().all(|&b| b.is_ascii_lowercase() || b == b'-')
 }
 
-fn rate_limit_response(retry_after: Duration) -> Response<Body> {
+fn rate_limit_response(retry_after: Duration, is_global: bool) -> Response<Body> {
     let retry_secs = retry_after.as_secs_f64();
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let retry_header = format!("{}", retry_secs.ceil() as u64);
     let body = format!(
-        r#"{{"message":"You are being rate limited.","retry_after":{retry_secs:.3},"global":false,"proxy":"weir"}}"#
+        r#"{{"message":"You are being rate limited.","retry_after":{retry_secs:.3},"global":{is_global},"proxy":"weir"}}"#
     );
 
     Response::builder()
