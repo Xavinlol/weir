@@ -67,11 +67,11 @@ pub async fn handle(
             warn!("cloudflare rate limited");
             counter!("weir_rate_limited_total", "kind" => "cloudflare").increment(1);
             record_request(
-                &method_str,
-                "429",
+                method_str,
+                "429".to_owned(),
                 auth_label,
                 bot_id,
-                &route_label,
+                route_label,
                 request_start,
             );
             return Err(rate_limit_response(retry_after, false));
@@ -80,11 +80,11 @@ pub async fn handle(
             debug!("global rate limited");
             counter!("weir_rate_limited_total", "kind" => "global").increment(1);
             record_request(
-                &method_str,
-                "429",
+                method_str,
+                "429".to_owned(),
                 auth_label,
                 bot_id,
-                &route_label,
+                route_label,
                 request_start,
             );
             return Err(rate_limit_response(retry_after, true));
@@ -93,11 +93,11 @@ pub async fn handle(
             debug!(bucket = %bucket_key, "bucket rate limited");
             counter!("weir_rate_limited_total", "kind" => "bucket").increment(1);
             record_request(
-                &method_str,
-                "429",
+                method_str,
+                "429".to_owned(),
                 auth_label,
                 bot_id,
-                &route_label,
+                route_label,
                 request_start,
             );
             return Err(rate_limit_response(retry_after, false));
@@ -106,11 +106,11 @@ pub async fn handle(
             debug!(bucket = %bucket_key, "queue timeout");
             counter!("weir_rate_limited_total", "kind" => "queue_timeout").increment(1);
             record_request(
-                &method_str,
-                "429",
+                method_str,
+                "429".to_owned(),
                 auth_label,
                 bot_id,
-                &route_label,
+                route_label,
                 request_start,
             );
             return Err(rate_limit_response(Duration::from_secs(1), false));
@@ -119,11 +119,11 @@ pub async fn handle(
             warn!("token disabled due to consecutive errors");
             counter!("weir_rate_limited_total", "kind" => "token_disabled").increment(1);
             record_request(
-                &method_str,
-                "403",
+                method_str,
+                "403".to_owned(),
                 auth_label,
                 bot_id,
-                &route_label,
+                route_label,
                 request_start,
             );
             return Err(error_response(StatusCode::FORBIDDEN, "token disabled"));
@@ -132,11 +132,11 @@ pub async fn handle(
             debug!(webhook_id = %bucket_key.major_id, "webhook auto-disabled");
             counter!("weir_rate_limited_total", "kind" => "webhook_disabled").increment(1);
             record_request(
-                &method_str,
-                "404",
+                method_str,
+                "404".to_owned(),
                 auth_label,
                 bot_id,
-                &route_label,
+                route_label,
                 request_start,
             );
             return Err(error_response(StatusCode::NOT_FOUND, "webhook disabled"));
@@ -153,11 +153,11 @@ pub async fn handle(
         .map_err(|e| {
             warn!(error = %e, "failed to build outgoing request");
             record_request(
-                &method_str,
-                "500",
+                method_str.clone(),
+                "500".to_owned(),
                 auth_label,
                 bot_id,
-                &route_label,
+                route_label.clone(),
                 request_start,
             );
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "failed to build request")
@@ -173,11 +173,11 @@ pub async fn handle(
     let response = state.http_client.execute(outgoing).await.map_err(|e| {
         warn!(error = %e, "discord request failed");
         record_request(
-            &method_str,
-            "502",
+            method_str.clone(),
+            "502".to_owned(),
             auth_label,
             bot_id,
-            &route_label,
+            route_label.clone(),
             request_start,
         );
         error_response(StatusCode::BAD_GATEWAY, "discord request failed")
@@ -232,11 +232,11 @@ pub async fn handle(
         let body_bytes = response.bytes().await.map_err(|e| {
             warn!(error = %e, "failed to read discord response body");
             record_request(
-                &method_str,
-                "502",
+                method_str.clone(),
+                "502".to_owned(),
                 auth_label,
                 bot_id,
-                &route_label,
+                route_label.clone(),
                 request_start,
             );
             error_response(StatusCode::BAD_GATEWAY, "failed to read response body")
@@ -304,18 +304,18 @@ pub async fn handle(
     let status_str = status.as_str().to_owned();
 
     record_request(
-        &method_str,
-        &status_str,
+        method_str,
+        status_str,
         auth_label,
         bot_id,
-        &route_label,
+        route_label,
         request_start,
     );
 
     if status.is_server_error()
         || (status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS)
     {
-        counter!("weir_discord_errors_total", "status" => status_str).increment(1);
+        counter!("weir_discord_errors_total", "status" => status.as_str().to_owned()).increment(1);
     }
 
     let mut builder = Response::builder().status(status.as_u16());
@@ -334,24 +334,24 @@ pub async fn handle(
 }
 
 fn record_request(
-    method: &str,
-    status: &str,
-    auth_label: &str,
+    method: String,
+    status: String,
+    auth_label: &'static str,
     bot_id: &str,
-    route: &str,
+    route: String,
     start: Instant,
 ) {
     counter!("weir_requests_total",
-        "method" => method.to_owned(),
-        "status" => status.to_owned(),
-        "auth_type" => auth_label.to_owned(),
+        "method" => method.clone(),
+        "status" => status,
+        "auth_type" => auth_label,
         "bot_id" => bot_id.to_owned(),
-        "route" => route.to_owned()
+        "route" => route.clone()
     )
     .increment(1);
     histogram!("weir_request_duration_seconds",
-        "method" => method.to_owned(),
-        "route" => route.to_owned()
+        "method" => method,
+        "route" => route
     )
     .record(start.elapsed().as_secs_f64());
 }
