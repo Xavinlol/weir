@@ -241,7 +241,8 @@ impl RateLimitManager {
             return AcquireResult::Allowed;
         }
 
-        if entry.queue.wait().await && entry.bucket.try_acquire() {
+        let _ = entry.queue.wait().await;
+        if entry.bucket.try_acquire() {
             return AcquireResult::Allowed;
         }
 
@@ -365,6 +366,13 @@ impl RateLimitManager {
             entry
                 .bucket
                 .update(0, entry.bucket.limit(), retry_after.as_secs_f64());
+
+            // Wake queued requests after the retry window expires
+            let wake_entry = Arc::clone(&entry);
+            tokio::spawn(async move {
+                tokio::time::sleep(retry_after).await;
+                wake_entry.queue.wake_all();
+            });
         }
     }
 
