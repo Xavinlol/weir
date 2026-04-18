@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderValue, Request, Response, StatusCode};
-use metrics::{counter, histogram};
+use metrics::{counter, gauge, histogram};
 use tracing::{debug, error, warn};
 use weir_ratelimit::memory::{AcquireResult, AuthType, HealthEvent};
 use weir_ratelimit::route::parse_bucket_key;
@@ -45,6 +45,18 @@ pub async fn handle(
         AuthType::Webhook => ("webhook", ""),
     };
     let route_label = metrics_route(path);
+
+    #[allow(clippy::cast_precision_loss)]
+    gauge!("weir_active_buckets").set(state.rate_limiter.bucket_count() as f64);
+    gauge!("weir_invalid_request_count")
+        .set(f64::from(state.rate_limiter.invalid_requests.count()));
+    gauge!("weir_cloudflare_blocked").set(
+        if state.rate_limiter.cloudflare.is_blocked().is_some() {
+            1.0
+        } else {
+            0.0
+        },
+    );
 
     match state
         .rate_limiter
@@ -490,8 +502,13 @@ fn metrics_route(path: &str) -> String {
         }
         result.push('/');
 
-        if segment.starts_with('@') {
-            result.push_str(segment);
+        if segment.starts_with('@') || segment.starts_with("%40") {
+            result.push('@');
+            let name = segment
+                .strip_prefix('@')
+                .or_else(|| segment.strip_prefix("%40"))
+                .unwrap_or(segment);
+            result.push_str(name);
         } else if !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit()) {
             result.push_str("{id}");
         } else if segment.len() >= 60 {
@@ -650,5 +667,15 @@ mod tests {
     #[test]
     fn metrics_route_api_non_version_v_prefix() {
         assert_eq!(metrics_route("/api/voice/regions"), "/voice/regions");
+    }
+
+    #[test]
+    fn metrics_route_url_encoded_at_original() {
+        let token = "abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+        let path = format!("/api/v10/webhooks/123456789012345678/{token}/messages/%40original");
+        assert_eq!(
+            metrics_route(&path),
+            "/webhooks/{id}/{token}/messages/@original"
+        );
     }
 }
