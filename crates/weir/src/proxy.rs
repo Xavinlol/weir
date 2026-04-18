@@ -210,6 +210,36 @@ pub async fn handle(
         error_response(StatusCode::BAD_GATEWAY, "failed to read response body")
     })?;
 
+    // Forensic dump on 401 so we can debug auth failures
+    if status == StatusCode::UNAUTHORIZED {
+        let resp_body = String::from_utf8_lossy(&body_bytes);
+        let req_headers: Vec<String> = parts
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                let v = if name.as_str() == "authorization" {
+                    let s = value.to_str().unwrap_or("<binary>");
+                    if s.len() > 20 {
+                        format!("{}...{}", &s[..10], &s[s.len() - 5..])
+                    } else {
+                        "<short>".into()
+                    }
+                } else {
+                    value.to_str().unwrap_or("<binary>").to_owned()
+                };
+                format!("{name}: {v}")
+            })
+            .collect();
+        warn!(
+            method = %method_str,
+            url = %target_url,
+            auth_type = %auth_label,
+            response = %resp_body,
+            headers = ?req_headers,
+            "401 UNAUTHORIZED from Discord"
+        );
+    }
+
     let rl_headers = RateLimitHeaders::from_headers(&headers);
     let has_via = has_via_header(&headers);
 
