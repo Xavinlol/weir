@@ -44,10 +44,7 @@ pub async fn handle(
         AuthType::Bearer(id) => ("bearer", id.as_str()),
         AuthType::Webhook => ("webhook", ""),
     };
-    let route_label = match bucket_key.sub_resource {
-        Some(sub) => format!("{}/{sub}", bucket_key.resource),
-        None => bucket_key.resource.to_string(),
-    };
+    let route_label = metrics_route(path);
 
     match state
         .rate_limiter
@@ -465,6 +462,64 @@ fn error_response(status: StatusCode, message: &str) -> Response<Body> {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
+/// Normalize a Discord API path into a bounded-cardinality metrics label.
+///
+/// Replaces snowflake IDs with `{id}`, long tokens (webhook/interaction) with
+/// `{token}`, and other variable segments (emoji, etc.) with `{val}`.
+/// Keeps keywords like `messages`, `@me`, `@original` intact.
+fn metrics_route(path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    // Strip query string
+    let path = path.split('?').next().unwrap_or(path);
+    // Strip /api/v{N}/ prefix
+    let path = if let Some(rest) = path.strip_prefix("api/") {
+        if rest.starts_with('v') && rest.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+            rest.split_once('/').map_or(rest, |(_, after)| after)
+        } else {
+            rest
+        }
+    } else {
+        path
+    };
+
+    let mut result = String::with_capacity(path.len());
+
+    for segment in path.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        result.push('/');
+
+        if segment.starts_with('@') {
+            result.push_str(segment);
+        } else if !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit()) {
+            result.push_str("{id}");
+        } else if segment.len() >= 60 {
+            result.push_str("{token}");
+        } else if is_api_keyword(segment) {
+            result.push_str(segment);
+        } else {
+            result.push_str("{val}");
+        }
+    }
+
+    if result.is_empty() {
+        result.push('/');
+    }
+
+    result
+}
+
+/// Returns true for segments that are fixed Discord API path keywords.
+/// Matches lowercase alpha with optional hyphens (e.g., `messages`, `auto-moderation`).
+#[inline]
+fn is_api_keyword(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    !bytes.is_empty()
+        && bytes[0].is_ascii_lowercase()
+        && bytes.iter().all(|&b| b.is_ascii_lowercase() || b == b'-')
+}
+
 fn rate_limit_response(retry_after: Duration) -> Response<Body> {
     let retry_secs = retry_after.as_secs_f64();
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -483,4 +538,117 @@ fn rate_limit_response(retry_after: Duration) -> Response<Body> {
         .header("x-sent-by-proxy", HeaderValue::from_static("weir"))
         .body(Body::from(body))
         .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_route_channels_messages() {
+        assert_eq!(
+            metrics_route("/api/v10/channels/123456789012345678/messages/987654321098765432"),
+            "/channels/{id}/messages/{id}"
+        );
+    }
+
+    #[test]
+    fn metrics_route_channels_messages_no_api_prefix() {
+        assert_eq!(
+            metrics_route("/channels/123456789012345678/messages"),
+            "/channels/{id}/messages"
+        );
+    }
+
+    #[test]
+    fn metrics_route_webhooks_with_token() {
+        let token = "abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+        let path = format!("/api/v10/webhooks/123456789012345678/{token}/messages/@original");
+        assert_eq!(
+            metrics_route(&path),
+            "/webhooks/{id}/{token}/messages/@original"
+        );
+    }
+
+    #[test]
+    fn metrics_route_interactions_callback() {
+        let token = "aW50ZXJhY3Rpb246MTIzNDU2Nzg5MDEyMzQ1Njc4OjE2OTk5OTk5OTk6dGVzdA";
+        let path = format!("/api/v10/interactions/123456789012345678/{token}/callback");
+        assert_eq!(metrics_route(&path), "/interactions/{id}/{token}/callback");
+    }
+
+    #[test]
+    fn metrics_route_users_me() {
+        assert_eq!(metrics_route("/api/v10/users/@me"), "/users/@me");
+    }
+
+    #[test]
+    fn metrics_route_gateway_bot() {
+        assert_eq!(metrics_route("/api/v10/gateway/bot"), "/gateway/bot");
+    }
+
+    #[test]
+    fn metrics_route_applications_commands() {
+        assert_eq!(
+            metrics_route("/api/v10/applications/123456789012345678/commands"),
+            "/applications/{id}/commands"
+        );
+    }
+
+    #[test]
+    fn metrics_route_guilds_channels() {
+        assert_eq!(
+            metrics_route("/api/v10/guilds/123456789012345678/channels"),
+            "/guilds/{id}/channels"
+        );
+    }
+
+    #[test]
+    fn metrics_route_webhook_execute() {
+        let token = "abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+        let path = format!("/api/v10/webhooks/123456789012345678/{token}");
+        assert_eq!(metrics_route(&path), "/webhooks/{id}/{token}");
+    }
+
+    #[test]
+    fn metrics_route_reaction_emoji() {
+        assert_eq!(
+            metrics_route("/api/v10/channels/123456789012345678/messages/987654321098765432/reactions/%F0%9F%91%8D/@me"),
+            "/channels/{id}/messages/{id}/reactions/{val}/@me"
+        );
+    }
+
+    #[test]
+    fn metrics_route_unversioned_api() {
+        assert_eq!(
+            metrics_route("/api/channels/123456789012345678/messages"),
+            "/channels/{id}/messages"
+        );
+    }
+
+    #[test]
+    fn metrics_route_auto_moderation() {
+        assert_eq!(
+            metrics_route("/api/v10/guilds/123456789012345678/auto-moderation/rules"),
+            "/guilds/{id}/auto-moderation/rules"
+        );
+    }
+
+    #[test]
+    fn metrics_route_empty_path() {
+        assert_eq!(metrics_route("/"), "/");
+    }
+
+    #[test]
+    fn metrics_route_query_string_stripped() {
+        assert_eq!(
+            metrics_route("/api/v10/channels/123456789012345678/messages?limit=50"),
+            "/channels/{id}/messages"
+        );
+    }
+
+    #[test]
+    fn metrics_route_api_non_version_v_prefix() {
+        assert_eq!(metrics_route("/api/voice/regions"), "/voice/regions");
+    }
 }
