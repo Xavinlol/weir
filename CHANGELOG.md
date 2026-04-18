@@ -1,3 +1,12 @@
+## [0.1.8](https://github.com/Xavinlol/weir/compare/v0.1.7...v0.1.8) (2026-04-18)
+
+
+### Bug Fixes
+
+* **ratelimit:** webhook health cleanup and README fixes ([072e2a1](https://github.com/Xavinlol/weir/commit/072e2a132543618c0754ee7d3521d36c174761e2))
+
+
+
 ## [0.1.7](https://github.com/Xavinlol/weir/compare/v0.1.6...v0.1.7) (2026-04-18)
 
 
@@ -32,15 +41,6 @@
 ### Bug Fixes
 
 * **metrics:** gauge emission and route label fixes ([#5](https://github.com/Xavinlol/weir/issues/5)) ([84989c4](https://github.com/Xavinlol/weir/commit/84989c4ae43d6ad78fe0a433c3538fcfec40cbf3))
-
-
-
-## [0.1.3](https://github.com/Xavinlol/weir/compare/v0.1.2...v0.1.3) (2026-04-18)
-
-
-### Features
-
-* **metrics:** descriptive route labels ([eacc90e](https://github.com/Xavinlol/weir/commit/eacc90e935f7217d26d6e3dcf1a249910d9b2e70))
 
 
 
