@@ -162,6 +162,14 @@ impl WebhookHealth {
             entry.disabled.store(false, Ordering::Release);
         }
     }
+
+    /// Remove idle entries (not disabled, zero error streak) to reclaim memory.
+    pub fn cleanup_idle(&self) {
+        self.entries.retain(|_, entry| {
+            entry.disabled.load(Ordering::Relaxed)
+                || entry.consecutive_404s.load(Ordering::Relaxed) > 0
+        });
+    }
 }
 
 impl Default for WebhookHealth {

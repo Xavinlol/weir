@@ -297,6 +297,8 @@ impl RateLimitManager {
                 .any(|e| e.key().starts_with(hash.as_str()))
         });
 
+        self.webhook_health.cleanup_idle();
+
         evicted
     }
 

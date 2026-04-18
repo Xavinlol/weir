@@ -1,20 +1,24 @@
 # Weir
 
-A high performance Discord REST API proxy written in Rust. Weir sits between your bot and Discord, handling global and per route rate limits, retries, and metrics so your application code can stay simple. It exists because running many bots or sharded services against a single token means you need one authoritative place to track buckets and avoid 429s.
+A high performance Discord REST API proxy written in Rust. Weir sits between your bots and Discord, handling global and per-route rate limits. It supports multiple bots, bearer tokens, and webhooks out of the box, with Cloudflare ban detection and Prometheus metrics. It exists because running many bots or sharded services against a single token means you need one authoritative place to track buckets and avoid 429s.
 
 ## Installation
 
 Build from source with Cargo:
 
 ```bash
-git clone https://github.com/xavin/weir.git
+git clone https://github.com/xavinlol/weir.git
 cd weir
 cargo build --release
 ```
 
-Or run it with Docker:
+Or use Docker:
 
 ```bash
+# Pull the pre-built image
+docker pull ghcr.io/xavinlol/weir:latest
+
+# Or use Docker Compose
 docker compose up -d
 ```
 
@@ -47,7 +51,7 @@ A few values can also be set through environment variables or CLI flags:
 | `LOG_LEVEL` | Override the log level (`trace`, `debug`, `info`, `warn`, `error`) |
 | `METRICS_PORT` | Override the Prometheus metrics port |
 
-Prometheus metrics are exposed on the metrics port at `/metrics`, and a health check lives at `/health` on the main port.
+Prometheus metrics are exposed on the metrics port at `/metrics`. Health checks live at `/health/live` and `/health/ready` on the main port.
 
 ## Contributing
 
