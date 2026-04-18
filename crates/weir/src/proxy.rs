@@ -35,7 +35,7 @@ pub async fn handle(
     debug!(%method, %path, "proxying request");
 
     let request_start = Instant::now();
-    let auth_type = extract_auth_type(&parts.headers, path);
+    let auth_type = extract_auth_type(&parts.headers);
     let bucket_key = parse_bucket_key(&method_str, path);
     let is_interaction = bucket_key.is_interaction();
 
@@ -361,37 +361,20 @@ fn record_request(
     .record(start.elapsed().as_secs_f64());
 }
 
-fn extract_auth_type(headers: &axum::http::HeaderMap, _path: &str) -> AuthType {
+fn extract_auth_type(headers: &axum::http::HeaderMap) -> AuthType {
     if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         let auth = Auth::from_header(auth_header);
         match auth {
             Auth::Bot { bot_id } if !bot_id.is_empty() => AuthType::Bot(bot_id),
             Auth::Bearer { bot_id } if !bot_id.is_empty() => AuthType::Bearer(bot_id),
-            _ => AuthType::Webhook,
+            Auth::Bot { .. } | Auth::Bearer { .. } => {
+                warn!("auth header present but bot_id extraction failed, treating as webhook");
+                AuthType::Webhook
+            }
+            Auth::None => AuthType::Webhook,
         }
     } else {
         AuthType::Webhook
-    }
-}
-
-/// Check if path matches /webhooks/{id}/{token} or /api/v{N}/webhooks/{id}/{token}.
-#[allow(dead_code)]
-fn is_webhook_path(path: &str) -> bool {
-    let path = path.trim_start_matches('/');
-    let path = if let Some(rest) = path.strip_prefix("api/") {
-        if let Some(pos) = rest.find('/') {
-            &rest[pos + 1..]
-        } else {
-            return false;
-        }
-    } else {
-        path
-    };
-
-    if let Some(rest) = path.strip_prefix("webhooks/") {
-        rest.contains('/')
-    } else {
-        false
     }
 }
 
