@@ -3,16 +3,8 @@ use base64::Engine;
 
 #[derive(Debug, Clone)]
 pub enum Auth {
-    Bot {
-        bot_id: String,
-    },
-    Bearer {
-        bot_id: String,
-    },
-    #[allow(dead_code)]
-    Webhook {
-        webhook_id: String,
-    },
+    Bot { bot_id: String },
+    Bearer { bot_id: String },
     None,
 }
 
@@ -34,16 +26,6 @@ impl Auth {
             Self::Bearer { bot_id }
         } else {
             Self::None
-        }
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn rate_limit_key(&self) -> Option<&str> {
-        match self {
-            Self::Bot { bot_id } | Self::Bearer { bot_id } => Some(bot_id),
-            Self::Webhook { webhook_id } => Some(webhook_id),
-            Self::None => None,
         }
     }
 }
@@ -86,13 +68,5 @@ mod tests {
     fn parse_invalid_header() {
         let auth = Auth::from_header("InvalidScheme token");
         assert!(matches!(auth, Auth::None));
-    }
-
-    #[test]
-    fn rate_limit_key_for_bot() {
-        let auth = Auth::Bot {
-            bot_id: "123".to_owned(),
-        };
-        assert_eq!(auth.rate_limit_key(), Some("123"));
     }
 }
