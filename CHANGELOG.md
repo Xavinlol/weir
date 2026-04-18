@@ -1,3 +1,12 @@
+## [0.1.10](https://github.com/Xavinlol/weir/compare/v0.1.9...v0.1.10) (2026-04-18)
+
+
+### Bug Fixes
+
+* **ratelimit:** prevent bucket refill from clobbering concurrent update ([#13](https://github.com/Xavinlol/weir/issues/13)) ([39eccda](https://github.com/Xavinlol/weir/commit/39eccda0dcfc34e9512e2a1cfb8a5aaf99a98e8a))
+
+
+
 ## [0.1.9](https://github.com/Xavinlol/weir/compare/v0.1.8...v0.1.9) (2026-04-18)
 
 
@@ -32,15 +41,6 @@
 ### Performance Improvements
 
 * **proxy:** stream request and response bodies instead of buffering ([#8](https://github.com/Xavinlol/weir/issues/8)) ([6ea04d8](https://github.com/Xavinlol/weir/commit/6ea04d82716499739cfd123f318312b5d0bc413f))
-
-
-
-## [0.1.5](https://github.com/Xavinlol/weir/compare/v0.1.4...v0.1.5) (2026-04-18)
-
-
-### Bug Fixes
-
-* code review fixes and dead code cleanup ([#7](https://github.com/Xavinlol/weir/issues/7)) ([135cbc8](https://github.com/Xavinlol/weir/commit/135cbc82de3bf83b63263cce9f87fb76c88d82d4))
 
 
 
