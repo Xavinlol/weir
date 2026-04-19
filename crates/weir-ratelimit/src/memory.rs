@@ -325,9 +325,16 @@ impl RateLimitManager {
             if let (Some(rem), Some(lim), Some(reset)) = (remaining, limit, reset_after) {
                 entry.bucket.update(rem, lim, reset);
 
-                // Wake queued requests if tokens are available
                 if rem > 0 {
+                    // Wake queued requests immediately
                     entry.queue.wake_all();
+                } else if reset > 0.0 {
+                    // Wake queued requests after the reset window expires
+                    let wake_entry = Arc::clone(&entry);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs_f64(reset)).await;
+                        wake_entry.queue.wake_all();
+                    });
                 }
             }
         }
@@ -778,5 +785,28 @@ mod tests {
             manager.acquire(&auth, &key, false).await,
             AcquireResult::Allowed
         ));
+    }
+
+    #[tokio::test]
+    async fn rem_zero_schedules_wake() {
+        let manager = RateLimitManager::new(ManagerConfig {
+            queue_timeout_ms: 5_000,
+            ..Default::default()
+        });
+        let auth = AuthType::Bot("123".to_owned());
+        let key = test_key("GET", Resource::Channels, "456");
+
+        // Teach route, consume the single token, then drain the bucket
+        manager.update_from_response(&auth, &key, Some("abc"), Some(1), Some(1), Some(0.3));
+        let _ = manager.acquire(&auth, &key, false).await;
+        manager.update_from_response(&auth, &key, Some("abc"), Some(0), Some(1), Some(0.3));
+
+        // Deferred wake should fire well before queue_timeout_ms
+        let start = std::time::Instant::now();
+        assert!(matches!(
+            manager.acquire(&auth, &key, false).await,
+            AcquireResult::Allowed
+        ));
+        assert!(start.elapsed() < Duration::from_millis(1_500));
     }
 }
