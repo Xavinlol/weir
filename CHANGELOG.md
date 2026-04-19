@@ -1,3 +1,12 @@
+## [0.1.11](https://github.com/Xavinlol/weir/compare/v0.1.10...v0.1.11) (2026-04-19)
+
+
+### Bug Fixes
+
+* **ratelimit:** schedule wake for drained buckets with known reset ([#14](https://github.com/Xavinlol/weir/issues/14)) ([886b2b3](https://github.com/Xavinlol/weir/commit/886b2b3318deba28d3cc62c0bb54ba6ba0d674f9))
+
+
+
 ## [0.1.10](https://github.com/Xavinlol/weir/compare/v0.1.9...v0.1.10) (2026-04-18)
 
 
@@ -32,15 +41,6 @@
 
 * **proxy:** eliminate redundant string allocations in metrics recording ([36aa38d](https://github.com/Xavinlol/weir/commit/36aa38d017116eb7b4491c231ab83f8196422626))
 * **proxy:** use Cow for method and status labels to avoid allocations ([8a3c87b](https://github.com/Xavinlol/weir/commit/8a3c87b913a2b8af4841a28f911f1d06a7fc5376))
-
-
-
-## [0.1.6](https://github.com/Xavinlol/weir/compare/v0.1.5...v0.1.6) (2026-04-18)
-
-
-### Performance Improvements
-
-* **proxy:** stream request and response bodies instead of buffering ([#8](https://github.com/Xavinlol/weir/issues/8)) ([6ea04d8](https://github.com/Xavinlol/weir/commit/6ea04d82716499739cfd123f318312b5d0bc413f))
 
 
 
