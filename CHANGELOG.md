@@ -1,3 +1,12 @@
+## [0.1.12](https://github.com/Xavinlol/weir/compare/v0.1.11...v0.1.12) (2026-04-22)
+
+
+### Bug Fixes
+
+* **ratelimit:** self-heal drained bucket when no update arrives ([#15](https://github.com/Xavinlol/weir/issues/15)) ([b0a84a6](https://github.com/Xavinlol/weir/commit/b0a84a676ae03d349f32c613fa19bf1298b26aea))
+
+
+
 ## [0.1.11](https://github.com/Xavinlol/weir/compare/v0.1.10...v0.1.11) (2026-04-19)
 
 
@@ -31,16 +40,6 @@
 ### Bug Fixes
 
 * **ratelimit:** webhook health cleanup and README fixes ([072e2a1](https://github.com/Xavinlol/weir/commit/072e2a132543618c0754ee7d3521d36c174761e2))
-
-
-
-## [0.1.7](https://github.com/Xavinlol/weir/compare/v0.1.6...v0.1.7) (2026-04-18)
-
-
-### Performance Improvements
-
-* **proxy:** eliminate redundant string allocations in metrics recording ([36aa38d](https://github.com/Xavinlol/weir/commit/36aa38d017116eb7b4491c231ab83f8196422626))
-* **proxy:** use Cow for method and status labels to avoid allocations ([8a3c87b](https://github.com/Xavinlol/weir/commit/8a3c87b913a2b8af4841a28f911f1d06a7fc5376))
 
 
 
