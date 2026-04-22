@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use crate::elapsed_millis;
 
+/// Refill window used when no Discord response has set a real `reset_at_ms`.
+const REFILL_FALLBACK_MS: u64 = 1000;
+
 /// Pack `remaining` (low 32) and `epoch` (high 32) into a single `u64`.
 #[inline]
 const fn pack_state(remaining: u32, epoch: u32) -> u64 {
@@ -31,7 +34,7 @@ impl Bucket {
             hash,
             state: AtomicU64::new(pack_state(1, 0)),
             limit: AtomicU32::new(1),
-            reset_at_ms: AtomicU64::new(u64::MAX),
+            reset_at_ms: AtomicU64::new(0),
             last_used_ms: AtomicU64::new(elapsed_millis()),
         }
     }
@@ -45,7 +48,12 @@ impl Bucket {
         if now >= reset_at
             && self
                 .reset_at_ms
-                .compare_exchange(reset_at, u64::MAX, Ordering::AcqRel, Ordering::Relaxed)
+                .compare_exchange(
+                    reset_at,
+                    now + REFILL_FALLBACK_MS,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
                 .is_ok()
         {
             let observed = self.state.load(Ordering::Acquire);
@@ -136,5 +144,16 @@ mod tests {
             assert!(bucket.try_acquire());
         }
         assert!(!bucket.try_acquire());
+    }
+
+    #[test]
+    fn self_heals_without_update() {
+        // Drained bucket must refill after the fallback window even if no `update()` arrives.
+        let bucket = Bucket::new("test".into());
+        assert!(bucket.try_acquire());
+        assert!(!bucket.try_acquire());
+
+        std::thread::sleep(Duration::from_millis(REFILL_FALLBACK_MS + 50));
+        assert!(bucket.try_acquire());
     }
 }
