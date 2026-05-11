@@ -12,6 +12,7 @@ workspace = true
 [features]
 default = []
 redis = ["dep:redis", "dep:anyhow", "dep:tracing", "dep:metrics"]
+integration = ["redis"]
 
 [dependencies]
 tokio = { workspace = true, features = ["sync", "time"] }
@@ -23,4 +24,6 @@ tracing = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["redis"] }
