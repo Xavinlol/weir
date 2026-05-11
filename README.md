@@ -83,7 +83,7 @@ l1_cache_ttl_ms = 250
 enable_pubsub_wakes = true
 ```
 
-All per-token state lives behind Redis Cluster hash tags, so the same config works against a single Redis instance, a Sentinel-fronted master, or a Redis Cluster (the `redis-rs` client auto-detects from the URL).
+State for each token uses Redis Cluster hash tags (`{token}`) so all keys for that token land in the same slot. The shipped client supports standalone Redis and Sentinel. Cluster support is on the roadmap.
 
 On Redis outage, each pod degrades to a fresh in-process limiter and continues serving traffic. When Redis returns, a background task reconnects, replays `SCRIPT LOAD`, and resumes shared-state mode. The `weir_redis_fallback_active` gauge tracks this state.
 

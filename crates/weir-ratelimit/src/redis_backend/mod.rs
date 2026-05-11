@@ -45,6 +45,7 @@ pub struct RedisConfig {
     pub queue_timeout: Duration,
     pub token_error_threshold: u32,
     pub webhook_404_threshold: u32,
+    pub overrides: HashMap<String, u32>,
 }
 
 impl Default for RedisConfig {
@@ -60,6 +61,7 @@ impl Default for RedisConfig {
             queue_timeout: Duration::from_secs(5),
             token_error_threshold: 5,
             webhook_404_threshold: 10,
+            overrides: HashMap::new(),
         }
     }
 }
@@ -161,7 +163,7 @@ impl RedisRateLimiter {
         let fallback = Arc::new(MemoryRateLimiter::new(ManagerConfig {
             global_limit_default: config.global_limit_default,
             queue_timeout_ms: u64::try_from(config.queue_timeout.as_millis()).unwrap_or(5000),
-            overrides: HashMap::new(),
+            overrides: config.overrides.clone(),
             token_error_threshold: config.token_error_threshold,
             webhook_404_threshold: config.webhook_404_threshold,
         }));

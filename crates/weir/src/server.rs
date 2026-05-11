@@ -117,6 +117,13 @@ fn redis_config_for(
     redis: &RedisConfig,
     config: &Config,
 ) -> weir_ratelimit::redis_backend::RedisConfig {
+    let overrides = config
+        .ratelimit
+        .overrides
+        .iter()
+        .map(|(k, v)| (k.clone(), v.global_limit))
+        .collect();
+
     weir_ratelimit::redis_backend::RedisConfig {
         url: redis.url.clone(),
         key_prefix: redis.key_prefix.clone(),
@@ -128,6 +135,7 @@ fn redis_config_for(
         queue_timeout: Duration::from_millis(config.ratelimit.queue_timeout_ms),
         token_error_threshold: config.protection.consecutive_error_threshold,
         webhook_404_threshold: config.protection.consecutive_404_threshold,
+        overrides,
     }
 }
 
