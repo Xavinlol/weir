@@ -6,6 +6,7 @@ use std::time::Instant;
 pub mod bucket;
 pub mod global;
 pub mod invalid;
+pub mod limiter;
 pub mod memory;
 pub mod protection;
 pub mod queue;

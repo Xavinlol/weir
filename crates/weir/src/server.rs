@@ -8,7 +8,8 @@ use axum::Router;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
-use weir_ratelimit::memory::{ManagerConfig, RateLimitManager};
+use weir_ratelimit::limiter::Limiter;
+use weir_ratelimit::memory::{ManagerConfig, MemoryRateLimiter};
 
 use crate::config::Config;
 use crate::health;
@@ -18,7 +19,7 @@ use crate::proxy;
 pub struct AppState {
     pub http_client: reqwest::Client,
     pub config: Arc<Config>,
-    pub rate_limiter: Arc<RateLimitManager>,
+    pub rate_limiter: Arc<Limiter>,
 }
 
 fn build_router(state: AppState) -> Router {
@@ -51,13 +52,13 @@ pub async fn run(config: Config) -> Result<()> {
         .map(|(k, v)| (k.clone(), v.global_limit))
         .collect();
 
-    let rate_limiter = Arc::new(RateLimitManager::new(ManagerConfig {
+    let rate_limiter = Arc::new(Limiter::Memory(MemoryRateLimiter::new(ManagerConfig {
         global_limit_default: config.ratelimit.global_limit_default,
         queue_timeout_ms: config.ratelimit.queue_timeout_ms,
         overrides,
         token_error_threshold: config.protection.consecutive_error_threshold,
         webhook_404_threshold: config.protection.consecutive_404_threshold,
-    }));
+    })));
 
     let state = AppState {
         http_client,

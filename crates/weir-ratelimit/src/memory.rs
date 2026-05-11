@@ -119,7 +119,7 @@ impl std::fmt::Debug for TokenState {
     }
 }
 
-/// Configuration for `RateLimitManager`.
+/// Configuration for `MemoryRateLimiter`.
 pub struct ManagerConfig {
     pub global_limit_default: u32,
     pub queue_timeout_ms: u64,
@@ -141,10 +141,10 @@ impl Default for ManagerConfig {
 }
 
 /// In-memory rate limit manager.
-pub struct RateLimitManager {
-    pub cloudflare: Arc<CloudflareState>,
-    pub invalid_requests: InvalidRequestCounter,
-    pub webhook_health: WebhookHealth,
+pub struct MemoryRateLimiter {
+    pub(crate) cloudflare: Arc<CloudflareState>,
+    pub(crate) invalid_requests: InvalidRequestCounter,
+    pub(crate) webhook_health: WebhookHealth,
     tokens: DashMap<String, Arc<TokenState>>,
     /// Shared state for unauthenticated requests (webhooks with token in URL).
     ip_state: Arc<TokenState>,
@@ -155,7 +155,7 @@ pub struct RateLimitManager {
     webhook_404_threshold: u32,
 }
 
-impl RateLimitManager {
+impl MemoryRateLimiter {
     pub fn new(config: ManagerConfig) -> Self {
         Self {
             cloudflare: Arc::new(CloudflareState::new()),
@@ -433,11 +433,26 @@ impl RateLimitManager {
         }
         total
     }
+
+    #[inline]
+    pub fn is_cloudflare_blocked(&self) -> bool {
+        self.cloudflare.is_blocked().is_some()
+    }
+
+    #[inline]
+    pub fn track_invalid(&self) -> u32 {
+        self.invalid_requests.track()
+    }
+
+    #[inline]
+    pub fn invalid_count(&self) -> u32 {
+        self.invalid_requests.count()
+    }
 }
 
-impl std::fmt::Debug for RateLimitManager {
+impl std::fmt::Debug for MemoryRateLimiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RateLimitManager")
+        f.debug_struct("MemoryRateLimiter")
             .field("tokens", &self.tokens.len())
             .field("global_limit_default", &self.global_limit_default)
             .field("overrides", &self.overrides.len())
@@ -470,7 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_route_allows() {
-        let manager = RateLimitManager::new(ManagerConfig::default());
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -480,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_limit_enforced() {
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             global_limit_default: 2,
             ..Default::default()
         });
@@ -503,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn interaction_skips_global() {
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             global_limit_default: 1,
             ..Default::default()
         });
@@ -524,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn cloudflare_blocks_request() {
-        let manager = RateLimitManager::new(ManagerConfig::default());
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -536,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn bucket_learning_and_enforcement() {
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             queue_timeout_ms: 100,
             ..Default::default()
         });
@@ -568,7 +583,7 @@ mod tests {
 
     #[tokio::test]
     async fn separate_tokens_separate_state() {
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             global_limit_default: 1,
             ..Default::default()
         });
@@ -595,7 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_uses_ip_state() {
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             global_limit_default: 1,
             ..Default::default()
         });
@@ -614,7 +629,7 @@ mod tests {
 
     #[test]
     fn handle_global_429() {
-        let manager = RateLimitManager::new(ManagerConfig::default());
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -627,7 +642,7 @@ mod tests {
 
     #[test]
     fn handle_cloudflare_429() {
-        let manager = RateLimitManager::new(ManagerConfig::default());
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -638,7 +653,7 @@ mod tests {
 
     #[test]
     fn cleanup_evicts_expired_buckets() {
-        let manager = RateLimitManager::new(ManagerConfig::default());
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -654,7 +669,7 @@ mod tests {
 
     #[test]
     fn cleanup_preserves_fresh_buckets() {
-        let manager = RateLimitManager::new(ManagerConfig::default());
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -672,7 +687,7 @@ mod tests {
     async fn override_applies_custom_global_limit() {
         let mut overrides = HashMap::new();
         overrides.insert("bot1".to_owned(), 500);
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             global_limit_default: 1,
             overrides,
             ..Default::default()
@@ -703,7 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_token_rejected() {
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             token_error_threshold: 2,
             ..Default::default()
         });
@@ -724,7 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_disabled_rejected() {
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             webhook_404_threshold: 2,
             ..Default::default()
         });
@@ -745,7 +760,7 @@ mod tests {
 
     #[test]
     fn report_cloudflare_403_blocks() {
-        let manager = RateLimitManager::new(ManagerConfig::default());
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -758,7 +773,7 @@ mod tests {
 
     #[test]
     fn report_success_resets_token_health() {
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             token_error_threshold: 3,
             ..Default::default()
         });
@@ -776,7 +791,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_health_skip_for_bot_auth() {
-        let manager = RateLimitManager::new(ManagerConfig::default());
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
@@ -789,7 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn rem_zero_schedules_wake() {
-        let manager = RateLimitManager::new(ManagerConfig {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
             queue_timeout_ms: 5_000,
             ..Default::default()
         });

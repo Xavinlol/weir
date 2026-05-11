@@ -24,8 +24,8 @@ pub async fn live() -> impl IntoResponse {
 }
 
 pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    let cloudflare_blocked = state.rate_limiter.cloudflare.is_blocked().is_some();
-    let invalid_count = state.rate_limiter.invalid_requests.count();
+    let cloudflare_blocked = state.rate_limiter.is_cloudflare_blocked();
+    let invalid_count = state.rate_limiter.invalid_count();
     let degraded = cloudflare_blocked || invalid_count >= 8000;
 
     #[allow(clippy::cast_precision_loss)]
