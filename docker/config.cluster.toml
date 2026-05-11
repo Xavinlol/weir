@@ -6,20 +6,16 @@ graceful_shutdown_timeout_ms = 30000
 
 [logging]
 level = "info"
-format = "json"           # json | pretty
+format = "json"
 access_log = true
 
 [ratelimit]
-backend = "memory"        # memory | redis
+backend = "redis"
 global_limit_default = 50
 disable_global_detection = false
 bucket_ttl_ms = 86400000
 cleanup_interval_ms = 300000
 queue_timeout_ms = 10000
-
-# Per-bot global rate limit overrides
-# [ratelimit.overrides."bot_id_here"]
-# global_limit = 500
 
 [protection]
 consecutive_error_threshold = 5
@@ -29,11 +25,8 @@ consecutive_404_threshold = 10
 enabled = true
 port = 9000
 
-# Required only when [ratelimit] backend = "redis".
-# Multiple weir instances pointed at the same Redis share rate-limit state.
-# Single-instance deployments using the memory backend can leave this out.
 [redis]
-url = "redis://localhost:6379"
+url = "redis://redis:6379"
 key_prefix = "weir:v1:"
 connect_timeout_ms = 5000
 command_timeout_ms = 200

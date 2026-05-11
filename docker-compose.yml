@@ -12,6 +12,44 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    profiles: [cluster]
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "allkeys-lru",
+      ]
+    restart: unless-stopped
+
+  weir-cluster:
+    build: .
+    profiles: [cluster]
+    volumes:
+      - ./docker/config.cluster.toml:/etc/weir/config.toml:ro
+    environment:
+      - WEIR_CONFIG=/etc/weir/config.toml
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on: [redis]
+    deploy:
+      replicas: 3
+    restart: unless-stopped
+
+  lb:
+    image: nginx:1.27-alpine
+    profiles: [cluster]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [weir-cluster]
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
     profiles: [monitoring]
