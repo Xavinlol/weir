@@ -9,9 +9,18 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+redis = ["dep:redis", "dep:anyhow", "dep:tracing", "dep:metrics"]
+
 [dependencies]
 tokio = { workspace = true, features = ["sync", "time"] }
 dashmap.workspace = true
+
+redis = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

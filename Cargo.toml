@@ -38,6 +38,8 @@ base64 = "0.22"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "connection-manager", "script"] }
+
 weir-ratelimit = { path = "crates/weir-ratelimit" }
 weir-metrics = { path = "crates/weir-metrics" }
 
