@@ -10,6 +10,8 @@ pub mod limiter;
 pub mod memory;
 pub mod protection;
 pub mod queue;
+#[cfg(feature = "redis")]
+pub mod redis_backend;
 pub mod route;
 
 static EPOCH: OnceLock<Instant> = OnceLock::new();
