@@ -11,7 +11,9 @@ use tracing::info;
 use weir_ratelimit::limiter::Limiter;
 use weir_ratelimit::memory::{ManagerConfig, MemoryRateLimiter};
 
-use crate::config::Config;
+#[cfg(feature = "redis")]
+use crate::config::RedisConfig;
+use crate::config::{Config, RatelimitBackend};
 use crate::health;
 use crate::proxy;
 
@@ -45,20 +47,7 @@ pub async fn run(config: Config) -> Result<()> {
         .user_agent(format!("Weir/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
 
-    let overrides = config
-        .ratelimit
-        .overrides
-        .iter()
-        .map(|(k, v)| (k.clone(), v.global_limit))
-        .collect();
-
-    let rate_limiter = Arc::new(Limiter::Memory(MemoryRateLimiter::new(ManagerConfig {
-        global_limit_default: config.ratelimit.global_limit_default,
-        queue_timeout_ms: config.ratelimit.queue_timeout_ms,
-        overrides,
-        token_error_threshold: config.protection.consecutive_error_threshold,
-        webhook_404_threshold: config.protection.consecutive_404_threshold,
-    })));
+    let rate_limiter = Arc::new(build_limiter(&config).await?);
 
     let state = AppState {
         http_client,
@@ -84,6 +73,62 @@ pub async fn run(config: Config) -> Result<()> {
 
     info!("shutdown complete");
     Ok(())
+}
+
+#[allow(clippy::unused_async)]
+async fn build_limiter(config: &Config) -> Result<Limiter> {
+    match config.ratelimit.backend {
+        RatelimitBackend::Memory => Ok(Limiter::Memory(build_memory_limiter(config))),
+        #[cfg(feature = "redis")]
+        RatelimitBackend::Redis => {
+            let r = weir_ratelimit::redis_backend::RedisRateLimiter::new(redis_config_for(
+                &config.redis,
+                config,
+            ))
+            .await?;
+            Ok(Limiter::Redis(Box::new(r)))
+        }
+        #[cfg(not(feature = "redis"))]
+        RatelimitBackend::Redis => {
+            anyhow::bail!("redis backend selected but binary built without `redis` feature")
+        }
+    }
+}
+
+fn build_memory_limiter(config: &Config) -> MemoryRateLimiter {
+    let overrides = config
+        .ratelimit
+        .overrides
+        .iter()
+        .map(|(k, v)| (k.clone(), v.global_limit))
+        .collect();
+
+    MemoryRateLimiter::new(ManagerConfig {
+        global_limit_default: config.ratelimit.global_limit_default,
+        queue_timeout_ms: config.ratelimit.queue_timeout_ms,
+        overrides,
+        token_error_threshold: config.protection.consecutive_error_threshold,
+        webhook_404_threshold: config.protection.consecutive_404_threshold,
+    })
+}
+
+#[cfg(feature = "redis")]
+fn redis_config_for(
+    redis: &RedisConfig,
+    config: &Config,
+) -> weir_ratelimit::redis_backend::RedisConfig {
+    weir_ratelimit::redis_backend::RedisConfig {
+        url: redis.url.clone(),
+        key_prefix: redis.key_prefix.clone(),
+        connect_timeout: Duration::from_millis(redis.connect_timeout_ms),
+        command_timeout: Duration::from_millis(redis.command_timeout_ms),
+        l1_cache_ttl: Duration::from_millis(redis.l1_cache_ttl_ms),
+        enable_pubsub_wakes: redis.enable_pubsub_wakes,
+        global_limit_default: config.ratelimit.global_limit_default,
+        queue_timeout: Duration::from_millis(config.ratelimit.queue_timeout_ms),
+        token_error_threshold: config.protection.consecutive_error_threshold,
+        webhook_404_threshold: config.protection.consecutive_404_threshold,
+    }
 }
 
 async fn shutdown_signal() {

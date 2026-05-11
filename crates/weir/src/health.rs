@@ -24,7 +24,7 @@ pub async fn live() -> impl IntoResponse {
 }
 
 pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    let cloudflare_blocked = state.rate_limiter.is_cloudflare_blocked();
+    let cloudflare_blocked = state.rate_limiter.is_cloudflare_blocked().await;
     let invalid_count = state.rate_limiter.invalid_count();
     let degraded = cloudflare_blocked || invalid_count >= 8000;
 

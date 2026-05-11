@@ -73,7 +73,7 @@ pub async fn handle(
     #[allow(clippy::cast_precision_loss)]
     gauge!("weir_active_buckets").set(state.rate_limiter.bucket_count() as f64);
     gauge!("weir_invalid_request_count").set(f64::from(state.rate_limiter.invalid_count()));
-    gauge!("weir_cloudflare_blocked").set(if state.rate_limiter.is_cloudflare_blocked() {
+    gauge!("weir_cloudflare_blocked").set(if state.rate_limiter.is_cloudflare_blocked().await {
         1.0
     } else {
         0.0
@@ -216,6 +216,7 @@ pub async fn handle(
     match state
         .rate_limiter
         .report_response(&auth_type, &bucket_key, status.as_u16(), has_via)
+        .await
     {
         HealthEvent::TokenDisabled => {
             warn!("token auto-disabled due to consecutive errors");
@@ -303,7 +304,8 @@ pub async fn handle(
                 &rl_headers,
                 has_via,
                 &body_bytes,
-            );
+            )
+            .await;
         }
 
         (Body::from(body_bytes), is_429)
@@ -311,16 +313,18 @@ pub async fn handle(
         (Body::from_stream(response.bytes_stream()), false)
     };
 
-    // handle_429 already calls update_from_response internally
     if !is_429 {
-        state.rate_limiter.update_from_response(
-            &auth_type,
-            &bucket_key,
-            rl_headers.bucket.as_deref(),
-            rl_headers.remaining,
-            rl_headers.limit,
-            rl_headers.reset_after,
-        );
+        state
+            .rate_limiter
+            .update_from_response(
+                &auth_type,
+                &bucket_key,
+                rl_headers.bucket.as_deref(),
+                rl_headers.remaining,
+                rl_headers.limit,
+                rl_headers.reset_after,
+            )
+            .await;
     }
 
     let status_cow = status_to_cow(status);
@@ -414,7 +418,7 @@ fn extract_auth_type(headers: &axum::http::HeaderMap) -> AuthType {
     }
 }
 
-fn handle_429(
+async fn handle_429(
     state: &AppState,
     auth: &AuthType,
     key: &weir_ratelimit::route::BucketKey,
@@ -454,16 +458,20 @@ fn handle_429(
 
     state
         .rate_limiter
-        .handle_rate_limit(auth, key, is_global, is_cloudflare, retry_after);
+        .handle_rate_limit(auth, key, is_global, is_cloudflare, retry_after)
+        .await;
 
-    state.rate_limiter.update_from_response(
-        auth,
-        key,
-        rl_headers.bucket.as_deref(),
-        Some(0),
-        rl_headers.limit,
-        rl_headers.reset_after,
-    );
+    state
+        .rate_limiter
+        .update_from_response(
+            auth,
+            key,
+            rl_headers.bucket.as_deref(),
+            Some(0),
+            rl_headers.limit,
+            rl_headers.reset_after,
+        )
+        .await;
 }
 
 #[inline]
