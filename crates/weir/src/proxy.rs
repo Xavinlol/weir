@@ -15,6 +15,21 @@ use crate::server::AppState;
 
 const DISCORD_BASE: &str = "https://discord.com";
 
+/// Walks `std::error::Error::source` so reqwest/hyper causes surface in logs.
+struct ErrorChain<'a>(&'a dyn std::error::Error);
+
+impl std::fmt::Display for ErrorChain<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)?;
+        let mut source = self.0.source();
+        while let Some(err) = source {
+            write!(f, " / caused by: {err}")?;
+            source = err.source();
+        }
+        Ok(())
+    }
+}
+
 /// Discord 429 response body with `retry_after` field.
 #[derive(serde::Deserialize)]
 struct RateLimitBody {
@@ -161,7 +176,7 @@ pub async fn handle(
         .body(reqwest::Body::wrap_stream(body.into_data_stream()))
         .build()
         .map_err(|e| {
-            warn!(error = %e, "failed to build outgoing request");
+            warn!(error = %ErrorChain(&e), "failed to build outgoing request");
             record_request(
                 method_str.clone(),
                 Cow::Borrowed("500"),
@@ -181,7 +196,7 @@ pub async fn handle(
 
     let discord_start = Instant::now();
     let response = state.http_client.execute(outgoing).await.map_err(|e| {
-        warn!(error = %e, "discord request failed");
+        warn!(error = %ErrorChain(&e), "discord request failed");
         record_request(
             method_str.clone(),
             Cow::Borrowed("502"),
@@ -240,7 +255,7 @@ pub async fn handle(
 
     let (response_body, is_429) = if needs_body {
         let body_bytes = response.bytes().await.map_err(|e| {
-            warn!(error = %e, "failed to read discord response body");
+            warn!(error = %ErrorChain(&e), "failed to read discord response body");
             record_request(
                 method_str.clone(),
                 Cow::Borrowed("502"),
@@ -335,7 +350,7 @@ pub async fn handle(
     builder = builder.header("x-sent-by-proxy", "weir");
 
     builder.body(response_body).map_err(|e| {
-        warn!(error = %e, "failed to build proxy response");
+        warn!(error = %ErrorChain(&e), "failed to build proxy response");
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to build response",
