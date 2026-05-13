@@ -82,6 +82,39 @@ async fn cf_ban_propagates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn override_applies_on_redis_hot_path() {
+    let (_container, url) = start_redis().await;
+
+    let mut cfg = config_for(url);
+    cfg.global_limit_default = 1;
+    cfg.overrides.insert("vip".to_owned(), 3);
+
+    let pod = RedisRateLimiter::new(cfg).await.expect("pod");
+
+    let vip = AuthType::Bot("vip".to_owned());
+    let normal = AuthType::Bot("normal".to_owned());
+    let key = channels_key("1");
+
+    for _ in 0..3 {
+        let r = pod.acquire(&vip, &key, false).await;
+        assert!(matches!(r, AcquireResult::Allowed), "vip slot {r:?}");
+    }
+    assert!(matches!(
+        pod.acquire(&vip, &key, false).await,
+        AcquireResult::GlobalLimited { .. }
+    ));
+
+    assert!(matches!(
+        pod.acquire(&normal, &key, false).await,
+        AcquireResult::Allowed
+    ));
+    assert!(matches!(
+        pod.acquire(&normal, &key, false).await,
+        AcquireResult::GlobalLimited { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outage_falls_back() {
     let (container, url) = start_redis().await;
 

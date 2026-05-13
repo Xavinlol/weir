@@ -130,7 +130,6 @@ fn redis_config_for(
         connect_timeout: Duration::from_millis(redis.connect_timeout_ms),
         command_timeout: Duration::from_millis(redis.command_timeout_ms),
         l1_cache_ttl: Duration::from_millis(redis.l1_cache_ttl_ms),
-        enable_pubsub_wakes: redis.enable_pubsub_wakes,
         global_limit_default: config.ratelimit.global_limit_default,
         queue_timeout: Duration::from_millis(config.ratelimit.queue_timeout_ms),
         token_error_threshold: config.protection.consecutive_error_threshold,

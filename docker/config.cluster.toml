@@ -31,4 +31,3 @@ key_prefix = "weir:v1:"
 connect_timeout_ms = 5000
 command_timeout_ms = 200
 l1_cache_ttl_ms = 250
-enable_pubsub_wakes = true

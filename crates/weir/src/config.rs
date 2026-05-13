@@ -93,7 +93,6 @@ pub struct RedisConfig {
     pub connect_timeout_ms: u64,
     pub command_timeout_ms: u64,
     pub l1_cache_ttl_ms: u64,
-    pub enable_pubsub_wakes: bool,
 }
 
 impl Default for ServerConfig {
@@ -158,7 +157,6 @@ impl Default for RedisConfig {
             connect_timeout_ms: 5_000,
             command_timeout_ms: 200,
             l1_cache_ttl_ms: 250,
-            enable_pubsub_wakes: true,
         }
     }
 }

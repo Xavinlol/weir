@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use metrics::{counter, gauge};
-use redis::aio::ConnectionManager;
+use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use redis::{Client, Script};
 use tracing::{info, warn};
 
@@ -40,7 +40,6 @@ pub struct RedisConfig {
     pub connect_timeout: Duration,
     pub command_timeout: Duration,
     pub l1_cache_ttl: Duration,
-    pub enable_pubsub_wakes: bool,
     pub global_limit_default: u32,
     pub queue_timeout: Duration,
     pub token_error_threshold: u32,
@@ -56,7 +55,6 @@ impl Default for RedisConfig {
             connect_timeout: Duration::from_secs(5),
             command_timeout: Duration::from_millis(200),
             l1_cache_ttl: Duration::from_millis(250),
-            enable_pubsub_wakes: true,
             global_limit_default: 50,
             queue_timeout: Duration::from_secs(5),
             token_error_threshold: 5,
@@ -152,9 +150,12 @@ impl RedisRateLimiter {
         let client = Client::open(config.url.clone())
             .with_context(|| format!("invalid redis url: {}", config.url))?;
 
-        let mut conn = tokio::time::timeout(config.connect_timeout, ConnectionManager::new(client))
+        let cm_config = ConnectionManagerConfig::new()
+            .set_connection_timeout(Some(config.connect_timeout))
+            .set_response_timeout(Some(config.command_timeout));
+
+        let mut conn = ConnectionManager::new_with_config(client, cm_config)
             .await
-            .context("redis connection timed out")?
             .context("failed to connect to redis")?;
 
         let scripts = Arc::new(Scripts::compile());
@@ -508,13 +509,19 @@ impl RedisRateLimiter {
             || self.bucket_sentinel_key(token_id),
             |h| self.bucket_key(token_id, h, major_id),
         );
+        let global_limit = self
+            .config
+            .overrides
+            .get(token_id)
+            .copied()
+            .unwrap_or(self.config.global_limit_default);
 
         let result: Result<(i64, i64), _> = self
             .scripts
             .acquire
             .key(&gkey)
             .key(&bkey)
-            .arg(self.config.global_limit_default)
+            .arg(global_limit)
             .arg(GLOBAL_WINDOW_MS)
             .arg(REFILL_FALLBACK_MS)
             .arg(TTL_GRACE_MS)

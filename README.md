@@ -80,7 +80,6 @@ key_prefix = "weir:v1:"
 connect_timeout_ms = 5000
 command_timeout_ms = 200
 l1_cache_ttl_ms = 250
-enable_pubsub_wakes = true
 ```
 
 State for each token uses Redis Cluster hash tags (`{token}`) so all keys for that token land in the same slot. The shipped client supports standalone Redis and Sentinel. Cluster support is on the roadmap.
@@ -88,6 +87,11 @@ State for each token uses Redis Cluster hash tags (`{token}`) so all keys for th
 On Redis outage, each pod degrades to a fresh in-process limiter and continues serving traffic. When Redis returns, a background task reconnects, replays `SCRIPT LOAD`, and resumes shared-state mode. The `weir_redis_fallback_active` gauge tracks this state.
 
 The binary is built with the `redis` Cargo feature enabled by default. To produce a slimmer memory-only binary, build with `--no-default-features`.
+
+Known limitations of the Redis backend (planned for future work):
+
+* The `weir_active_buckets` and `weir_invalid_request_count` gauges are not aggregated across pods; they report 0 on the Redis backend.
+* Cluster mode (`redis://` URLs pointing at a Redis Cluster) is on the roadmap. Standalone and Sentinel topologies work today.
 
 ## Running multiple instances
 
