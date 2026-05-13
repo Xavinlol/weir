@@ -93,21 +93,21 @@ impl Limiter {
         }
     }
 
-    #[inline]
-    pub fn track_invalid(&self) -> u32 {
+    #[allow(clippy::unused_async)]
+    pub async fn track_invalid(&self) -> u32 {
         match self {
             Self::Memory(m) => m.track_invalid(),
             #[cfg(feature = "redis")]
-            Self::Redis(_) => 0,
+            Self::Redis(r) => r.track_invalid().await,
         }
     }
 
-    #[inline]
-    pub fn invalid_count(&self) -> u32 {
+    #[allow(clippy::unused_async)]
+    pub async fn invalid_count(&self) -> u32 {
         match self {
             Self::Memory(m) => m.invalid_count(),
             #[cfg(feature = "redis")]
-            Self::Redis(_) => 0,
+            Self::Redis(r) => r.invalid_count().await,
         }
     }
 

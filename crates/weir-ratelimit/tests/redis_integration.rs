@@ -115,6 +115,27 @@ async fn override_applies_on_redis_hot_path() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_count_shared_across_pods() {
+    let (_container, url) = start_redis().await;
+
+    let cfg = config_for(url);
+    let pod_a = RedisRateLimiter::new(cfg.clone()).await.expect("pod a");
+    let pod_b = RedisRateLimiter::new(cfg).await.expect("pod b");
+
+    for _ in 0..5 {
+        pod_a.track_invalid().await;
+    }
+    for _ in 0..3 {
+        pod_b.track_invalid().await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let count = pod_a.invalid_count().await;
+    assert_eq!(count, 8, "shared invalid count, got {count}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outage_falls_back() {
     let (container, url) = start_redis().await;
 

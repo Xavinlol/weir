@@ -22,6 +22,7 @@ const GLOBAL_WINDOW_MS: u64 = 1000;
 const WEBHOOK_NAMESPACE: &str = "wh";
 const RECONNECT_BACKOFF_MIN_MS: u64 = 1000;
 const RECONNECT_BACKOFF_MAX_MS: u64 = 30_000;
+const INVALID_WINDOW_MS: u64 = 10 * 60 * 1000;
 
 fn jitter(base_ms: u64) -> u64 {
     use std::time::SystemTime;
@@ -75,6 +76,7 @@ struct Scripts {
     health_record_error: Script,
     health_record_success: Script,
     health_read: Script,
+    track_invalid: Script,
 }
 
 impl Scripts {
@@ -90,6 +92,7 @@ impl Scripts {
             health_record_error: Script::new(include_str!("scripts/health_record_error.lua")),
             health_record_success: Script::new(include_str!("scripts/health_record_success.lua")),
             health_read: Script::new(include_str!("scripts/health_read.lua")),
+            track_invalid: Script::new(include_str!("scripts/track_invalid.lua")),
         }
     }
 
@@ -105,6 +108,7 @@ impl Scripts {
             ("health_record_error", &self.health_record_error),
             ("health_record_success", &self.health_record_success),
             ("health_read", &self.health_read),
+            ("track_invalid", &self.track_invalid),
         ] {
             script
                 .load_async(conn)
@@ -112,6 +116,19 @@ impl Scripts {
                 .with_context(|| format!("failed to SCRIPT LOAD {name}"))?;
         }
         Ok(())
+    }
+}
+
+/// Cached integer with the local `Instant` it was fetched at.
+#[derive(Clone, Copy)]
+struct CountSnapshot {
+    value: u32,
+    fetched_at: Instant,
+}
+
+impl CountSnapshot {
+    fn is_fresh(&self, ttl: Duration) -> bool {
+        self.fetched_at.elapsed() < ttl
     }
 }
 
@@ -141,6 +158,7 @@ pub struct RedisRateLimiter {
     config: RedisConfig,
     cf_cache: Mutex<Option<Snapshot>>,
     health_cache: DashMap<String, Snapshot>,
+    invalid_cache: Mutex<Option<CountSnapshot>>,
     fallback: Arc<MemoryRateLimiter>,
     degraded: Arc<AtomicBool>,
 }
@@ -181,6 +199,7 @@ impl RedisRateLimiter {
             config,
             cf_cache: Mutex::new(None),
             health_cache: DashMap::new(),
+            invalid_cache: Mutex::new(None),
             fallback,
             degraded: Arc::clone(&degraded),
         };
@@ -199,6 +218,10 @@ impl RedisRateLimiter {
 
     fn cf_key(&self) -> String {
         format!("{}cf:blocked_until", self.config.key_prefix)
+    }
+
+    fn invalid_key(&self) -> String {
+        format!("{}invalid:count", self.config.key_prefix)
     }
 
     fn token_health_key(&self, token_id: &str) -> String {
@@ -311,6 +334,75 @@ impl RedisRateLimiter {
                 self.mark_degraded("cf_set_blocked");
             }
         }
+    }
+
+    pub async fn track_invalid(&self) -> u32 {
+        if self.is_degraded() {
+            return self.fallback.track_invalid();
+        }
+        let key = self.invalid_key();
+        let mut conn = self.conn.clone();
+        let result: Result<i64, _> = self
+            .scripts
+            .track_invalid
+            .key(&key)
+            .arg(INVALID_WINDOW_MS)
+            .invoke_async(&mut conn)
+            .await;
+
+        match result {
+            Ok(count) => {
+                let value = u32::try_from(count).unwrap_or(u32::MAX);
+                *self.invalid_cache.lock().expect("invalid_cache poisoned") = Some(CountSnapshot {
+                    value,
+                    fetched_at: Instant::now(),
+                });
+                value
+            }
+            Err(e) => {
+                warn!(error = %e, "redis track_invalid failed");
+                self.mark_degraded("track_invalid");
+                self.fallback.track_invalid()
+            }
+        }
+    }
+
+    pub async fn invalid_count(&self) -> u32 {
+        if self.is_degraded() {
+            return self.fallback.invalid_count();
+        }
+        if let Some(snap) = self
+            .invalid_cache
+            .lock()
+            .expect("invalid_cache poisoned")
+            .as_ref()
+            .copied()
+        {
+            if snap.is_fresh(self.config.l1_cache_ttl) {
+                return snap.value;
+            }
+        }
+
+        let key = self.invalid_key();
+        let mut conn = self.conn.clone();
+        let result: Result<Option<i64>, _> =
+            redis::cmd("GET").arg(&key).query_async(&mut conn).await;
+
+        let value = match result {
+            Ok(Some(v)) => u32::try_from(v).unwrap_or(u32::MAX),
+            Ok(None) => 0,
+            Err(e) => {
+                warn!(error = %e, "redis invalid_count read failed");
+                self.mark_degraded("invalid_count");
+                return self.fallback.invalid_count();
+            }
+        };
+
+        *self.invalid_cache.lock().expect("invalid_cache poisoned") = Some(CountSnapshot {
+            value,
+            fetched_at: Instant::now(),
+        });
+        value
     }
 
     async fn record_health_error(&self, key: &str, threshold: u32) -> bool {

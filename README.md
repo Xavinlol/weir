@@ -90,7 +90,7 @@ The binary is built with the `redis` Cargo feature enabled by default. To produc
 
 Known limitations of the Redis backend (planned for future work):
 
-* The `weir_active_buckets` and `weir_invalid_request_count` gauges are not aggregated across pods; they report 0 on the Redis backend.
+* The `weir_active_buckets` gauge reports 0 on the Redis backend. State lives in Redis, not in-process, and a fleet-wide count would need a periodic `SCAN`. Not implemented.
 * Cluster mode (`redis://` URLs pointing at a Redis Cluster) is on the roadmap. Standalone and Sentinel topologies work today.
 
 ## Running multiple instances

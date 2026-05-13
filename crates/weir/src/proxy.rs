@@ -72,7 +72,7 @@ pub async fn handle(
 
     #[allow(clippy::cast_precision_loss)]
     gauge!("weir_active_buckets").set(state.rate_limiter.bucket_count() as f64);
-    gauge!("weir_invalid_request_count").set(f64::from(state.rate_limiter.invalid_count()));
+    gauge!("weir_invalid_request_count").set(f64::from(state.rate_limiter.invalid_count().await));
     gauge!("weir_cloudflare_blocked").set(if state.rate_limiter.is_cloudflare_blocked().await {
         1.0
     } else {
@@ -239,7 +239,7 @@ pub async fn handle(
                 && rl_headers.scope != Some(RateLimitScope::Shared)));
     if is_invalid {
         counter!("weir_invalid_requests_total").increment(1);
-        let count = state.rate_limiter.track_invalid();
+        let count = state.rate_limiter.track_invalid().await;
         if count >= 9500 {
             error!(count, "approaching invalid request limit (10000/10min)");
         } else if count >= 8000 {
