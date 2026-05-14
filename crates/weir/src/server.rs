@@ -126,6 +126,7 @@ fn redis_config_for(
 
     weir_ratelimit::redis_backend::RedisConfig {
         url: redis.url.clone(),
+        cluster_nodes: redis.cluster_nodes.clone(),
         key_prefix: redis.key_prefix.clone(),
         connect_timeout: Duration::from_millis(redis.connect_timeout_ms),
         command_timeout: Duration::from_millis(redis.command_timeout_ms),

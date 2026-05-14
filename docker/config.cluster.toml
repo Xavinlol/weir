@@ -27,6 +27,7 @@ port = 9000
 
 [redis]
 url = "redis://redis:6379"
+cluster_nodes = []
 key_prefix = "weir:v1:"
 connect_timeout_ms = 5000
 command_timeout_ms = 200

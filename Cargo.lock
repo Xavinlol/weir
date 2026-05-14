@@ -407,6 +407,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "crc16"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "338089f42c427b86394a5ee60ff321da23a5c89c9d89514c829687b26359fcff"
+
+[[package]]
 name = "crossbeam-epoch"
 version = "0.9.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1529,11 +1535,14 @@ dependencies = [
  "bytes",
  "cfg-if",
  "combine",
+ "crc16",
  "futures-channel",
  "futures-util",
  "itoa",
+ "log",
  "percent-encoding",
  "pin-project-lite",
+ "rand",
  "rustls",
  "rustls-native-certs",
  "ryu",

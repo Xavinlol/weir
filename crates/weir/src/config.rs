@@ -89,6 +89,7 @@ pub struct MetricsConfig {
 #[serde(default)]
 pub struct RedisConfig {
     pub url: String,
+    pub cluster_nodes: Vec<String>,
     pub key_prefix: String,
     pub connect_timeout_ms: u64,
     pub command_timeout_ms: u64,
@@ -153,6 +154,7 @@ impl Default for RedisConfig {
     fn default() -> Self {
         Self {
             url: "redis://localhost:6379".to_owned(),
+            cluster_nodes: Vec::new(),
             key_prefix: "weir:v1:".to_owned(),
             connect_timeout_ms: 5_000,
             command_timeout_ms: 200,

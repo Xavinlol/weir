@@ -6,8 +6,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use metrics::{counter, gauge};
-use redis::aio::{ConnectionManager, ConnectionManagerConfig};
-use redis::{Client, Script};
+use redis::aio::{
+    ConnectionLike, ConnectionManager, ConnectionManagerConfig, MultiplexedConnection,
+};
+use redis::cluster::ClusterClientBuilder;
+use redis::cluster_async::ClusterConnection;
+use redis::{Client, Cmd, Pipeline, RedisFuture, Script, Value};
 use tracing::{info, warn};
 
 use crate::memory::{AcquireResult, AuthType, HealthEvent, ManagerConfig, MemoryRateLimiter};
@@ -37,6 +41,7 @@ fn jitter(base_ms: u64) -> u64 {
 #[derive(Debug, Clone)]
 pub struct RedisConfig {
     pub url: String,
+    pub cluster_nodes: Vec<String>,
     pub key_prefix: String,
     pub connect_timeout: Duration,
     pub command_timeout: Duration,
@@ -52,6 +57,7 @@ impl Default for RedisConfig {
     fn default() -> Self {
         Self {
             url: "redis://localhost:6379".to_owned(),
+            cluster_nodes: Vec::new(),
             key_prefix: "weir:v1:".to_owned(),
             connect_timeout: Duration::from_secs(5),
             command_timeout: Duration::from_millis(200),
@@ -96,7 +102,7 @@ impl Scripts {
         }
     }
 
-    async fn load_all(&self, conn: &mut ConnectionManager) -> Result<()> {
+    async fn load_all(&self, conn: &mut RedisConn) -> Result<()> {
         for (name, script) in [
             ("acquire", &self.acquire),
             ("bucket_only_acquire", &self.bucket_only_acquire),
@@ -116,6 +122,42 @@ impl Scripts {
                 .with_context(|| format!("failed to SCRIPT LOAD {name}"))?;
         }
         Ok(())
+    }
+}
+
+/// Connection handle that dispatches to either a standalone `ConnectionManager`
+/// or a `ClusterConnection`. Both implement `aio::ConnectionLike`; calls forward unchanged.
+#[derive(Clone)]
+enum RedisConn {
+    Standalone(ConnectionManager),
+    Cluster(ClusterConnection<MultiplexedConnection>),
+}
+
+impl ConnectionLike for RedisConn {
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
+        match self {
+            Self::Standalone(c) => c.req_packed_command(cmd),
+            Self::Cluster(c) => c.req_packed_command(cmd),
+        }
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        cmd: &'a Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisFuture<'a, Vec<Value>> {
+        match self {
+            Self::Standalone(c) => c.req_packed_commands(cmd, offset, count),
+            Self::Cluster(c) => c.req_packed_commands(cmd, offset, count),
+        }
+    }
+
+    fn get_db(&self) -> i64 {
+        match self {
+            Self::Standalone(c) => c.get_db(),
+            Self::Cluster(c) => c.get_db(),
+        }
     }
 }
 
@@ -153,7 +195,7 @@ impl Snapshot {
 
 /// Redis-backed rate limiter.
 pub struct RedisRateLimiter {
-    conn: ConnectionManager,
+    conn: RedisConn,
     scripts: Arc<Scripts>,
     config: RedisConfig,
     cf_cache: Mutex<Option<Snapshot>>,
@@ -165,16 +207,28 @@ pub struct RedisRateLimiter {
 
 impl RedisRateLimiter {
     pub async fn new(config: RedisConfig) -> Result<Self> {
-        let client = Client::open(config.url.clone())
-            .with_context(|| format!("invalid redis url: {}", config.url))?;
-
-        let cm_config = ConnectionManagerConfig::new()
-            .set_connection_timeout(Some(config.connect_timeout))
-            .set_response_timeout(Some(config.command_timeout));
-
-        let mut conn = ConnectionManager::new_with_config(client, cm_config)
-            .await
-            .context("failed to connect to redis")?;
+        let mut conn = if config.cluster_nodes.is_empty() {
+            let client = Client::open(config.url.clone())
+                .with_context(|| format!("invalid redis url: {}", config.url))?;
+            let cm_config = ConnectionManagerConfig::new()
+                .set_connection_timeout(Some(config.connect_timeout))
+                .set_response_timeout(Some(config.command_timeout));
+            let cm = ConnectionManager::new_with_config(client, cm_config)
+                .await
+                .context("failed to connect to redis")?;
+            RedisConn::Standalone(cm)
+        } else {
+            let cluster = ClusterClientBuilder::new(config.cluster_nodes.clone())
+                .connection_timeout(config.connect_timeout)
+                .response_timeout(config.command_timeout)
+                .build()
+                .context("invalid redis cluster config")?;
+            let cc = cluster
+                .get_async_connection()
+                .await
+                .context("failed to connect to redis cluster")?;
+            RedisConn::Cluster(cc)
+        };
 
         let scripts = Arc::new(Scripts::compile());
         scripts.load_all(&mut conn).await?;
@@ -840,11 +894,7 @@ impl RedisRateLimiter {
     }
 }
 
-async fn reconnect_loop(
-    mut conn: ConnectionManager,
-    scripts: Arc<Scripts>,
-    degraded: Arc<AtomicBool>,
-) {
+async fn reconnect_loop(mut conn: RedisConn, scripts: Arc<Scripts>, degraded: Arc<AtomicBool>) {
     let mut backoff_ms = RECONNECT_BACKOFF_MIN_MS;
     loop {
         tokio::time::sleep(Duration::from_millis(jitter(backoff_ms))).await;

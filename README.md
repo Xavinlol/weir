@@ -75,23 +75,19 @@ Shared state across multiple weir instances. Pods cooperate on the same bucket c
 backend = "redis"
 
 [redis]
-url = "redis://redis:6379"
+url = "redis://redis:6379"           # standalone Redis or managed Redis primary endpoint
+cluster_nodes = []                   # set this for Redis Cluster, e.g. ["redis://n1:6379", "redis://n2:6379"]
 key_prefix = "weir:v1:"
 connect_timeout_ms = 5000
 command_timeout_ms = 200
 l1_cache_ttl_ms = 250
 ```
 
-State for each token uses Redis Cluster hash tags (`{token}`) so all keys for that token land in the same slot. The shipped client supports standalone Redis and Sentinel. Cluster support is on the roadmap.
+State for each token uses Redis Cluster hash tags (`{token}`) so all keys for that token land in the same slot. Standalone Redis and Redis Cluster are supported. For Cluster mode, set `cluster_nodes` to the seed list and leave `url` unused. Managed Redis services (AWS ElastiCache, GCP Memorystore, Azure Cache, Upstash) work via the standalone path using their primary endpoint URL. Redis Sentinel is not directly supported; front a self-managed Sentinel deployment with HAProxy or any Redis-aware proxy that exposes a plain Redis URL.
 
 On Redis outage, each pod degrades to a fresh in-process limiter and continues serving traffic. When Redis returns, a background task reconnects, replays `SCRIPT LOAD`, and resumes shared-state mode. The `weir_redis_fallback_active` gauge tracks this state.
 
 The binary is built with the `redis` Cargo feature enabled by default. To produce a slimmer memory-only binary, build with `--no-default-features`.
-
-Known limitations of the Redis backend (planned for future work):
-
-* The `weir_active_buckets` gauge reports 0 on the Redis backend. State lives in Redis, not in-process, and a fleet-wide count would need a periodic `SCAN`. Not implemented.
-* Cluster mode (`redis://` URLs pointing at a Redis Cluster) is on the roadmap. Standalone and Sentinel topologies work today.
 
 ## Running multiple instances
 
