@@ -46,7 +46,7 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
 
     describe_gauge!(
         "weir_active_buckets",
-        "Current number of rate limit buckets in memory"
+        "Current number of rate limit buckets tracked locally (memory backend; reports 0 on Redis)"
     );
     describe_gauge!(
         "weir_invalid_request_count",

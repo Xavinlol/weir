@@ -5,11 +5,14 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::routing::get;
 use axum::Router;
+use metrics::gauge;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
 use weir_ratelimit::limiter::Limiter;
 use weir_ratelimit::memory::{ManagerConfig, MemoryRateLimiter};
+
+const GAUGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[cfg(feature = "redis")]
 use crate::config::RedisConfig;
@@ -62,6 +65,8 @@ pub async fn run(config: Config) -> Result<()> {
         limiter.run_cleanup(cleanup_interval, ttl).await;
     });
 
+    tokio::spawn(sample_gauges(Arc::clone(&state.rate_limiter)));
+
     let addr = SocketAddr::new(state.config.server.host, state.config.server.port);
     let listener = TcpListener::bind(addr).await?;
 
@@ -73,6 +78,20 @@ pub async fn run(config: Config) -> Result<()> {
 
     info!("shutdown complete");
     Ok(())
+}
+
+async fn sample_gauges(limiter: Arc<Limiter>) {
+    let mut tick = tokio::time::interval(GAUGE_SAMPLE_INTERVAL);
+    loop {
+        tick.tick().await;
+        let cf = limiter.is_cloudflare_blocked().await;
+        let invalid = limiter.invalid_count().await;
+        let buckets = limiter.bucket_count();
+        gauge!("weir_cloudflare_blocked").set(if cf { 1.0 } else { 0.0 });
+        gauge!("weir_invalid_request_count").set(f64::from(invalid));
+        #[allow(clippy::cast_precision_loss)]
+        gauge!("weir_active_buckets").set(buckets as f64);
+    }
 }
 
 #[allow(clippy::unused_async)]
