@@ -12,6 +12,10 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["redis"]
+redis = ["weir-ratelimit/redis"]
+
 [dependencies]
 weir-ratelimit.workspace = true
 weir-metrics.workspace = true

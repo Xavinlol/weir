@@ -53,6 +53,95 @@ A few values can also be set through environment variables or CLI flags:
 
 Prometheus metrics are exposed on the metrics port at `/metrics`. Health checks live at `/health/live` and `/health/ready` on the main port.
 
+## Backends
+
+Weir ships two rate-limit backends, selected by `[ratelimit] backend` in the config.
+
+### Memory (default)
+
+In-process state, zero external dependencies. Fast, lock-free hot path. Use this when running a single instance.
+
+```toml
+[ratelimit]
+backend = "memory"
+```
+
+### Redis (distributed)
+
+Shared state across multiple weir instances. Pods cooperate on the same bucket counters, global limits, Cloudflare ban state, and token/webhook health. Required when running behind a load balancer with more than one replica.
+
+```toml
+[ratelimit]
+backend = "redis"
+
+[redis]
+url = "redis://redis:6379"           # standalone Redis or managed Redis primary endpoint
+cluster_nodes = []                   # set this for Redis Cluster, e.g. ["redis://n1:6379", "redis://n2:6379"]
+key_prefix = "weir:v1:"
+connect_timeout_ms = 5000
+command_timeout_ms = 200
+l1_cache_ttl_ms = 250
+```
+
+State for each token uses Redis Cluster hash tags (`{token}`) so all keys for that token land in the same slot. Standalone Redis and Redis Cluster are supported. For Cluster mode, set `cluster_nodes` to the seed list and leave `url` unused. Managed Redis services (AWS ElastiCache, GCP Memorystore, Azure Cache, Upstash) work via the standalone path using their primary endpoint URL. Redis Sentinel is not directly supported; front a self-managed Sentinel deployment with HAProxy or any Redis-aware proxy that exposes a plain Redis URL.
+
+On Redis outage, each pod degrades to a fresh in-process limiter and continues serving traffic. When Redis returns, a background task reconnects, replays `SCRIPT LOAD`, and resumes shared-state mode. The `weir_redis_fallback_active` gauge tracks this state.
+
+The binary is built with the `redis` Cargo feature enabled by default. To produce a slimmer memory-only binary, build with `--no-default-features`.
+
+## Running multiple instances
+
+### Docker Compose
+
+The repo ships a `cluster` compose profile that wires three weir replicas behind an nginx load balancer, with Redis backing rate-limit state:
+
+```bash
+docker compose --profile cluster up -d
+```
+
+This exposes the proxy on `http://localhost:8080`. Nginx round-robins to the replicas via Docker DNS; scaling is `docker compose --profile cluster up -d --scale weir-cluster=5`.
+
+### Kubernetes
+
+A `Deployment` with `replicas: N` plus a `Service` is enough. Kube-proxy handles load balancing for free. Use a Redis Operator (or a managed Redis) and point every weir pod at the same URL:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weir
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: weir }
+  template:
+    metadata:
+      labels: { app: weir }
+    spec:
+      containers:
+        - name: weir
+          image: ghcr.io/xavinlol/weir:latest
+          ports: [{ containerPort: 8080 }, { containerPort: 9000 }]
+          env:
+            - { name: WEIR_CONFIG, value: /etc/weir/config.toml }
+          volumeMounts:
+            - { name: config, mountPath: /etc/weir, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: weir-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weir
+spec:
+  selector: { app: weir }
+  ports:
+    - { port: 8080, targetPort: 8080 }
+```
+
+The ConfigMap should contain a `config.toml` with `backend = "redis"` and a `[redis]` section pointing at the shared Redis.
+
 ## Contributing
 
 Pull requests are welcome. If you are planning a larger change, please open an issue first so we can talk through the approach. For smaller fixes, just send the PR. Please run `cargo fmt` and `cargo clippy` before you push.

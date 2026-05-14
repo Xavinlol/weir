@@ -16,6 +16,8 @@ pub struct Config {
     pub ratelimit: RatelimitConfig,
     pub protection: ProtectionConfig,
     pub metrics: MetricsConfig,
+    #[cfg(feature = "redis")]
+    pub redis: RedisConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +84,18 @@ pub struct MetricsConfig {
     pub port: u16,
 }
 
+#[cfg(feature = "redis")]
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct RedisConfig {
+    pub url: String,
+    pub cluster_nodes: Vec<String>,
+    pub key_prefix: String,
+    pub connect_timeout_ms: u64,
+    pub command_timeout_ms: u64,
+    pub l1_cache_ttl_ms: u64,
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -131,6 +145,20 @@ impl Default for MetricsConfig {
         Self {
             enabled: true,
             port: 9000,
+        }
+    }
+}
+
+#[cfg(feature = "redis")]
+impl Default for RedisConfig {
+    fn default() -> Self {
+        Self {
+            url: "redis://localhost:6379".to_owned(),
+            cluster_nodes: Vec::new(),
+            key_prefix: "weir:v1:".to_owned(),
+            connect_timeout_ms: 5_000,
+            command_timeout_ms: 200,
+            l1_cache_ttl_ms: 250,
         }
     }
 }

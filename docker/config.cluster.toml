@@ -1,0 +1,34 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+request_timeout_ms = 10000
+graceful_shutdown_timeout_ms = 30000
+
+[logging]
+level = "info"
+format = "json"
+access_log = true
+
+[ratelimit]
+backend = "redis"
+global_limit_default = 50
+disable_global_detection = false
+bucket_ttl_ms = 86400000
+cleanup_interval_ms = 300000
+queue_timeout_ms = 10000
+
+[protection]
+consecutive_error_threshold = 5
+consecutive_404_threshold = 10
+
+[metrics]
+enabled = true
+port = 9000
+
+[redis]
+url = "redis://redis:6379"
+cluster_nodes = []
+key_prefix = "weir:v1:"
+connect_timeout_ms = 5000
+command_timeout_ms = 200
+l1_cache_ttl_ms = 250

@@ -28,3 +28,17 @@ consecutive_404_threshold = 10
 [metrics]
 enabled = true
 port = 9000
+
+# Required only when [ratelimit] backend = "redis".
+# Multiple weir instances pointed at the same Redis share rate-limit state.
+# Single-instance deployments using the memory backend can leave this out.
+[redis]
+url = "redis://localhost:6379"
+# Set cluster_nodes (non-empty list) to use Redis Cluster instead of standalone.
+# When non-empty, `url` is ignored.
+# cluster_nodes = ["redis://node1:6379", "redis://node2:6379", "redis://node3:6379"]
+cluster_nodes = []
+key_prefix = "weir:v1:"
+connect_timeout_ms = 5000
+command_timeout_ms = 200
+l1_cache_ttl_ms = 250
