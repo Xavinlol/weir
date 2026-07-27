@@ -36,6 +36,7 @@ fn build_router(state: AppState) -> Router {
     let router = Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
+        .route("/health/upstream", get(health::upstream))
         .fallback(proxy::handle);
 
     let router = if state.config.logging.access_log {

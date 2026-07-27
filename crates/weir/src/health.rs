@@ -6,39 +6,64 @@ use serde::Serialize;
 
 use crate::server::AppState;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 80% of Discord's 10k invalid requests per 10 minutes.
+const INVALID_REQUEST_THRESHOLD: u32 = 8000;
+
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
     pub version: &'static str,
 }
 
-pub async fn live() -> impl IntoResponse {
+#[derive(Debug, Serialize)]
+pub struct UpstreamResponse {
+    pub status: &'static str,
+    pub version: &'static str,
+    pub cloudflare_blocked: bool,
+    pub invalid_requests: u32,
+}
+
+fn healthy() -> (StatusCode, Json<HealthResponse>) {
     (
         StatusCode::OK,
         Json(HealthResponse {
             status: "healthy",
-            version: env!("CARGO_PKG_VERSION"),
+            version: VERSION,
         }),
     )
 }
 
-pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    let cloudflare_blocked = state.rate_limiter.is_cloudflare_blocked().await;
-    let invalid_count = state.rate_limiter.invalid_count().await;
-    let degraded = cloudflare_blocked || invalid_count >= 8000;
+pub async fn live() -> impl IntoResponse {
+    healthy()
+}
 
-    let status = if degraded { "degraded" } else { "healthy" };
-    let http_status = if degraded {
-        StatusCode::SERVICE_UNAVAILABLE
+/// Ignores Cloudflare bans and the invalid budget on purpose: that state is
+/// shared on the Redis backend, so it belongs on `/health/upstream`.
+pub async fn ready() -> impl IntoResponse {
+    healthy()
+}
+
+/// How Discord sees the fleet. For alerts, not probes.
+pub async fn upstream(State(state): State<AppState>) -> impl IntoResponse {
+    let cloudflare_blocked = state.rate_limiter.is_cloudflare_blocked().await;
+    let invalid_requests = state.rate_limiter.invalid_count().await;
+    let degraded = cloudflare_blocked || invalid_requests >= INVALID_REQUEST_THRESHOLD;
+
+    let (code, status) = if degraded {
+        (StatusCode::SERVICE_UNAVAILABLE, "degraded")
     } else {
-        StatusCode::OK
+        (StatusCode::OK, "healthy")
     };
 
     (
-        http_status,
-        Json(HealthResponse {
+        code,
+        Json(UpstreamResponse {
             status,
-            version: env!("CARGO_PKG_VERSION"),
+            version: VERSION,
+            cloudflare_blocked,
+            invalid_requests,
         }),
     )
 }
