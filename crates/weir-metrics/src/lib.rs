@@ -46,7 +46,7 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
 
     describe_gauge!(
         "weir_active_buckets",
-        "Current number of rate limit buckets in memory"
+        "Current number of rate limit buckets tracked in-process (Redis backend counts only fallback state)"
     );
     describe_gauge!(
         "weir_invalid_request_count",
@@ -55,6 +55,23 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
     describe_gauge!(
         "weir_cloudflare_blocked",
         "Whether the proxy is currently Cloudflare-blocked (0 or 1)"
+    );
+    describe_gauge!(
+        "weir_redis_fallback_active",
+        "Whether this pod has fallen back to in-process rate limit state (0 or 1)"
+    );
+
+    describe_counter!(
+        "weir_redis_errors_total",
+        "Redis command failures, labelled by operation"
+    );
+    describe_counter!(
+        "weir_redis_reconnects_total",
+        "Transitions out of Redis fallback mode"
+    );
+    describe_counter!(
+        "weir_redis_fail_open_total",
+        "Requests allowed through without a rate limit decision because Redis errored"
     );
 
     Ok(())

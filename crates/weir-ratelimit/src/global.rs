@@ -64,7 +64,7 @@ impl GlobalRateLimit {
     pub fn set_blocked(&self, retry_after: Duration) {
         #[allow(clippy::cast_possible_truncation)]
         let until = elapsed_millis() + retry_after.as_millis() as u64;
-        self.blocked_until_ms.store(until, Ordering::Release);
+        self.blocked_until_ms.fetch_max(until, Ordering::Release);
     }
 
     #[inline]
@@ -96,6 +96,16 @@ mod tests {
         let rl = GlobalRateLimit::new(50);
         rl.set_blocked(Duration::from_secs(10));
         assert!(!rl.try_acquire());
+    }
+
+    #[test]
+    fn a_shorter_block_never_shortens_an_existing_one() {
+        let rl = GlobalRateLimit::new(50);
+        rl.set_blocked(Duration::from_mins(10));
+        let deadline = rl.blocked_until_ms.load(Ordering::Relaxed);
+
+        rl.set_blocked(Duration::from_secs(1));
+        assert_eq!(rl.blocked_until_ms.load(Ordering::Relaxed), deadline);
     }
 
     #[test]

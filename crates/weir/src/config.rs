@@ -16,6 +16,8 @@ pub struct Config {
     pub ratelimit: RatelimitConfig,
     pub protection: ProtectionConfig,
     pub metrics: MetricsConfig,
+    #[cfg(feature = "redis")]
+    pub redis: RedisConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,7 +50,6 @@ pub enum LogFormat {
 pub struct RatelimitConfig {
     pub backend: RatelimitBackend,
     pub global_limit_default: u32,
-    pub disable_global_detection: bool,
     pub bucket_ttl_ms: u64,
     pub cleanup_interval_ms: u64,
     pub queue_timeout_ms: u64,
@@ -82,6 +83,18 @@ pub struct MetricsConfig {
     pub port: u16,
 }
 
+#[cfg(feature = "redis")]
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct RedisConfig {
+    pub url: String,
+    pub cluster_nodes: Vec<String>,
+    pub key_prefix: String,
+    pub connect_timeout_ms: u64,
+    pub command_timeout_ms: u64,
+    pub l1_cache_ttl_ms: u64,
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -98,7 +111,7 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_owned(),
             format: LogFormat::default(),
-            access_log: true,
+            access_log: false,
         }
     }
 }
@@ -108,7 +121,6 @@ impl Default for RatelimitConfig {
         Self {
             backend: RatelimitBackend::default(),
             global_limit_default: 50,
-            disable_global_detection: false,
             bucket_ttl_ms: 86_400_000,
             cleanup_interval_ms: 300_000,
             queue_timeout_ms: 10_000,
@@ -131,6 +143,20 @@ impl Default for MetricsConfig {
         Self {
             enabled: true,
             port: 9000,
+        }
+    }
+}
+
+#[cfg(feature = "redis")]
+impl Default for RedisConfig {
+    fn default() -> Self {
+        Self {
+            url: "redis://localhost:6379".to_owned(),
+            cluster_nodes: Vec::new(),
+            key_prefix: "weir:v1:".to_owned(),
+            connect_timeout_ms: 5_000,
+            command_timeout_ms: 200,
+            l1_cache_ttl_ms: 250,
         }
     }
 }

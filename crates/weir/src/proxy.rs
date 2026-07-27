@@ -4,13 +4,13 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderValue, Request, Response, StatusCode};
-use metrics::{counter, gauge, histogram};
+use metrics::{counter, histogram};
 use tracing::{debug, error, warn};
 use weir_ratelimit::memory::{AcquireResult, AuthType, HealthEvent};
 use weir_ratelimit::route::parse_bucket_key;
 
 use crate::request::Auth;
-use crate::response::{has_via_header, RateLimitHeaders, RateLimitScope};
+use crate::response::{has_via_header, RateLimitHeaders, RateLimitScope, MAX_RESET_AFTER_SECS};
 use crate::server::AppState;
 
 const DISCORD_BASE: &str = "https://discord.com";
@@ -69,18 +69,6 @@ pub async fn handle(
         AuthType::Webhook => ("webhook", ""),
     };
     let route_label = metrics_route(path);
-
-    #[allow(clippy::cast_precision_loss)]
-    gauge!("weir_active_buckets").set(state.rate_limiter.bucket_count() as f64);
-    gauge!("weir_invalid_request_count")
-        .set(f64::from(state.rate_limiter.invalid_requests.count()));
-    gauge!("weir_cloudflare_blocked").set(
-        if state.rate_limiter.cloudflare.is_blocked().is_some() {
-            1.0
-        } else {
-            0.0
-        },
-    );
 
     match state
         .rate_limiter
@@ -219,6 +207,7 @@ pub async fn handle(
     match state
         .rate_limiter
         .report_response(&auth_type, &bucket_key, status.as_u16(), has_via)
+        .await
     {
         HealthEvent::TokenDisabled => {
             warn!("token auto-disabled due to consecutive errors");
@@ -241,7 +230,7 @@ pub async fn handle(
                 && rl_headers.scope != Some(RateLimitScope::Shared)));
     if is_invalid {
         counter!("weir_invalid_requests_total").increment(1);
-        let count = state.rate_limiter.invalid_requests.track();
+        let count = state.rate_limiter.track_invalid().await;
         if count >= 9500 {
             error!(count, "approaching invalid request limit (10000/10min)");
         } else if count >= 8000 {
@@ -306,7 +295,8 @@ pub async fn handle(
                 &rl_headers,
                 has_via,
                 &body_bytes,
-            );
+            )
+            .await;
         }
 
         (Body::from(body_bytes), is_429)
@@ -314,16 +304,18 @@ pub async fn handle(
         (Body::from_stream(response.bytes_stream()), false)
     };
 
-    // handle_429 already calls update_from_response internally
     if !is_429 {
-        state.rate_limiter.update_from_response(
-            &auth_type,
-            &bucket_key,
-            rl_headers.bucket.as_deref(),
-            rl_headers.remaining,
-            rl_headers.limit,
-            rl_headers.reset_after,
-        );
+        state
+            .rate_limiter
+            .update_from_response(
+                &auth_type,
+                &bucket_key,
+                rl_headers.bucket.as_deref(),
+                rl_headers.remaining,
+                rl_headers.limit,
+                rl_headers.reset_after,
+            )
+            .await;
     }
 
     let status_cow = status_to_cow(status);
@@ -417,7 +409,7 @@ fn extract_auth_type(headers: &axum::http::HeaderMap) -> AuthType {
     }
 }
 
-fn handle_429(
+async fn handle_429(
     state: &AppState,
     auth: &AuthType,
     key: &weir_ratelimit::route::BucketKey,
@@ -433,7 +425,9 @@ fn handle_429(
         .ok()
         .and_then(|b| b.retry_after)
         .unwrap_or(0.0);
-    let retry_after_secs = header_retry.max(body_retry);
+    let retry_after_secs = header_retry
+        .max(body_retry)
+        .clamp(0.0, MAX_RESET_AFTER_SECS);
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let retry_after = Duration::from_millis((retry_after_secs * 1000.0) as u64);
@@ -457,16 +451,20 @@ fn handle_429(
 
     state
         .rate_limiter
-        .handle_rate_limit(auth, key, is_global, is_cloudflare, retry_after);
+        .handle_rate_limit(auth, key, is_global, is_cloudflare, retry_after)
+        .await;
 
-    state.rate_limiter.update_from_response(
-        auth,
-        key,
-        rl_headers.bucket.as_deref(),
-        Some(0),
-        rl_headers.limit,
-        rl_headers.reset_after,
-    );
+    state
+        .rate_limiter
+        .update_from_response(
+            auth,
+            key,
+            rl_headers.bucket.as_deref(),
+            Some(0),
+            rl_headers.limit,
+            rl_headers.reset_after,
+        )
+        .await;
 }
 
 #[inline]
@@ -495,6 +493,19 @@ fn is_hop_by_hop(name: &str) -> bool {
     )
 }
 
+/// Webhook and interaction tokens live in the path and are credentials.
+pub(crate) fn redact_path(path: &str) -> Cow<'_, str> {
+    if !path.split('/').any(|seg| seg.len() >= 60) {
+        return Cow::Borrowed(path);
+    }
+    Cow::Owned(
+        path.split('/')
+            .map(|seg| if seg.len() >= 60 { "<redacted>" } else { seg })
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+}
+
 /// Redact long path segments (tokens) from URLs before logging.
 fn redact_url_tokens(url: &str) -> String {
     // Split at the path portion after the host
@@ -510,11 +521,7 @@ fn redact_url_tokens(url: &str) -> String {
         None => (path_and_query, None),
     };
 
-    let redacted_path: String = path
-        .split('/')
-        .map(|seg| if seg.len() >= 60 { "<redacted>" } else { seg })
-        .collect::<Vec<_>>()
-        .join("/");
+    let redacted_path = redact_path(path);
 
     match query {
         Some(q) => format!("{prefix}{redacted_path}{q}"),

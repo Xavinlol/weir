@@ -16,13 +16,19 @@ pub enum RateLimitScope {
     Shared,
 }
 
+/// `f64` parsing accepts `inf` and `NaN`, which panic `Duration::from_secs_f64`
+/// and break Redis `PEXPIRE`.
+pub(crate) const MAX_RESET_AFTER_SECS: f64 = 3600.0;
+
 impl RateLimitHeaders {
     pub fn from_headers(headers: &axum::http::HeaderMap) -> Self {
         Self {
             bucket: header_str(headers, "x-ratelimit-bucket"),
             limit: header_parse(headers, "x-ratelimit-limit"),
             remaining: header_parse(headers, "x-ratelimit-remaining"),
-            reset_after: header_parse(headers, "x-ratelimit-reset-after"),
+            reset_after: header_parse::<f64>(headers, "x-ratelimit-reset-after")
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, MAX_RESET_AFTER_SECS)),
             is_global: headers
                 .get("x-ratelimit-global")
                 .and_then(|v| v.to_str().ok())
