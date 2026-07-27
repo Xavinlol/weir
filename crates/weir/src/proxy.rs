@@ -491,6 +491,19 @@ fn is_hop_by_hop(name: &str) -> bool {
     )
 }
 
+/// Webhook and interaction tokens live in the path and are credentials.
+pub(crate) fn redact_path(path: &str) -> Cow<'_, str> {
+    if !path.split('/').any(|seg| seg.len() >= 60) {
+        return Cow::Borrowed(path);
+    }
+    Cow::Owned(
+        path.split('/')
+            .map(|seg| if seg.len() >= 60 { "<redacted>" } else { seg })
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+}
+
 /// Redact long path segments (tokens) from URLs before logging.
 fn redact_url_tokens(url: &str) -> String {
     // Split at the path portion after the host
@@ -506,11 +519,7 @@ fn redact_url_tokens(url: &str) -> String {
         None => (path_and_query, None),
     };
 
-    let redacted_path: String = path
-        .split('/')
-        .map(|seg| if seg.len() >= 60 { "<redacted>" } else { seg })
-        .collect::<Vec<_>>()
-        .join("/");
+    let redacted_path = redact_path(path);
 
     match query {
         Some(q) => format!("{prefix}{redacted_path}{q}"),

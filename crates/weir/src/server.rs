@@ -1,14 +1,19 @@
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use axum::extract::Request;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use metrics::gauge;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tracing::info;
+use tokio::sync::oneshot;
+use tracing::{info, warn};
 use weir_ratelimit::limiter::Limiter;
 use weir_ratelimit::memory::{ManagerConfig, MemoryRateLimiter};
 
@@ -28,11 +33,35 @@ pub struct AppState {
 }
 
 fn build_router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
-        .fallback(proxy::handle)
-        .with_state(state)
+        .fallback(proxy::handle);
+
+    let router = if state.config.logging.access_log {
+        router.layer(middleware::from_fn(access_log))
+    } else {
+        router
+    };
+
+    router.with_state(state)
+}
+
+async fn access_log(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = proxy::redact_path(req.uri().path()).into_owned();
+    let start = Instant::now();
+
+    let response = next.run(req).await;
+
+    info!(
+        %method,
+        %path,
+        status = response.status().as_u16(),
+        duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "request"
+    );
+    response
 }
 
 pub async fn run(config: Config) -> Result<()> {
@@ -68,16 +97,36 @@ pub async fn run(config: Config) -> Result<()> {
     tokio::spawn(sample_gauges(Arc::clone(&state.rate_limiter)));
 
     let addr = SocketAddr::new(state.config.server.host, state.config.server.port);
+    let shutdown_timeout = Duration::from_millis(state.config.server.graceful_shutdown_timeout_ms);
     let listener = TcpListener::bind(addr).await?;
 
     info!(%addr, "listening");
 
-    axum::serve(listener, build_router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let (signalled_tx, signalled_rx) = oneshot::channel();
+    let server = axum::serve(listener, build_router(state))
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = signalled_tx.send(());
+        })
+        .into_future();
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => result?,
+        () = drain_deadline(signalled_rx, shutdown_timeout) => {
+            warn!(timeout_ms = shutdown_timeout.as_millis(), "graceful shutdown timed out");
+        }
+    }
 
     info!("shutdown complete");
     Ok(())
+}
+
+async fn drain_deadline(signalled: oneshot::Receiver<()>, timeout: Duration) {
+    if signalled.await.is_err() {
+        return std::future::pending().await;
+    }
+    tokio::time::sleep(timeout).await;
 }
 
 async fn sample_gauges(limiter: Arc<Limiter>) {
@@ -178,5 +227,49 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => info!("received Ctrl+C, shutting down"),
         () = terminate => info!("received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_deadline_starts_at_the_signal() {
+        let (tx, rx) = oneshot::channel();
+        let deadline = drain_deadline(rx, Duration::from_secs(30));
+        tokio::pin!(deadline);
+
+        assert!(
+            tokio::time::timeout(Duration::from_mins(1), &mut deadline)
+                .await
+                .is_err(),
+            "must not fire before the shutdown signal"
+        );
+
+        tx.send(()).unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(29), &mut deadline)
+                .await
+                .is_err(),
+            "must wait the full timeout after the signal"
+        );
+        assert!(tokio::time::timeout(Duration::from_secs(2), &mut deadline)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_deadline_never_fires_without_a_sender() {
+        let (tx, rx) = oneshot::channel::<()>();
+        drop(tx);
+
+        assert!(tokio::time::timeout(
+            Duration::from_hours(1),
+            drain_deadline(rx, Duration::from_millis(1))
+        )
+        .await
+        .is_err());
     }
 }
