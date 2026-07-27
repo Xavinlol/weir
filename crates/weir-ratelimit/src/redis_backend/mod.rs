@@ -30,6 +30,7 @@ const RECONNECT_BACKOFF_MAX_MS: u64 = 30_000;
 const INVALID_WINDOW_MS: u64 = 10 * 60 * 1000;
 const DEGRADE_FAILURE_THRESHOLD: u32 = 3;
 const CACHE_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
+const CLUSTER_RETRY_BUDGET: Duration = Duration::from_secs(3);
 
 // acquire.lua ARGV[5] and its denial reason.
 const GLOBAL_SKIP: u8 = 0;
@@ -257,6 +258,7 @@ pub struct RedisRateLimiter {
     fallback: Arc<MemoryRateLimiter>,
     degraded: Arc<AtomicBool>,
     failures: Arc<AtomicU32>,
+    probe_key: Arc<Mutex<String>>,
     reconnect: JoinHandle<()>,
 }
 
@@ -289,6 +291,7 @@ impl RedisRateLimiter {
             let cluster = ClusterClientBuilder::new(config.cluster_nodes.clone())
                 .connection_timeout(config.connect_timeout)
                 .response_timeout(config.command_timeout)
+                .overall_response_timeout(Some(config.command_timeout.max(CLUSTER_RETRY_BUDGET)))
                 .build()
                 .context("invalid redis cluster config")?;
             let cc = cluster
@@ -314,12 +317,13 @@ impl RedisRateLimiter {
         info!(url = %config.url, prefix = %config.key_prefix, "redis backend ready");
         gauge!("weir_redis_fallback_active").set(0.0);
 
+        let probe_key = Arc::new(Mutex::new(cf_key(&config.key_prefix)));
         let reconnect = tokio::spawn(reconnect_loop(
             conn.clone(),
             Arc::clone(&scripts),
             Arc::clone(&degraded),
             Arc::clone(&failures),
-            cf_key(&config.key_prefix),
+            Arc::clone(&probe_key),
         ));
 
         Ok(Self {
@@ -333,6 +337,7 @@ impl RedisRateLimiter {
             fallback,
             degraded,
             failures,
+            probe_key,
             reconnect,
         })
     }
@@ -383,7 +388,7 @@ impl RedisRateLimiter {
         self.degraded.load(Ordering::Acquire)
     }
 
-    fn observe<T>(&self, kind: &'static str, result: RedisResult<T>) -> Option<T> {
+    fn observe<T>(&self, kind: &'static str, key: &str, result: RedisResult<T>) -> Option<T> {
         match result {
             Ok(v) => {
                 self.failures.store(0, Ordering::Relaxed);
@@ -393,19 +398,21 @@ impl RedisRateLimiter {
                 warn!(error = %e, op = kind, "redis command failed");
                 counter!("weir_redis_errors_total", "kind" => kind).increment(1);
                 if self.failures.fetch_add(1, Ordering::AcqRel) + 1 >= DEGRADE_FAILURE_THRESHOLD {
-                    self.enter_degraded(kind);
+                    self.enter_degraded(kind, key);
                 }
                 None
             }
         }
     }
 
-    fn enter_degraded(&self, kind: &'static str) {
-        if self.degraded.swap(true, Ordering::AcqRel) {
-            return;
-        }
+    fn enter_degraded(&self, kind: &'static str, key: &str) {
         if let Some(remaining) = self.cf_snapshot().and_then(CfSnapshot::remaining) {
             self.fallback.cloudflare.set_blocked(remaining);
+        }
+        key.clone_into(&mut self.probe_key.lock().expect("probe_key poisoned"));
+
+        if self.degraded.swap(true, Ordering::AcqRel) {
+            return;
         }
         warn!(
             reason = kind,
@@ -442,7 +449,7 @@ impl RedisRateLimiter {
         let result: RedisResult<(u64, u64)> =
             self.scripts.cf_read.key(&key).invoke_async(&mut conn).await;
 
-        let Some((blocked_until_ms, server_now_ms)) = self.observe("cf_read", result) else {
+        let Some((blocked_until_ms, server_now_ms)) = self.observe("cf_read", &key, result) else {
             return self
                 .cf_snapshot()
                 .and_then(CfSnapshot::remaining)
@@ -473,7 +480,7 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        let Some((new_bu, server_now)) = self.observe("cf_set_blocked", result) else {
+        let Some((new_bu, server_now)) = self.observe("cf_set_blocked", &key, result) else {
             return false;
         };
 
@@ -499,7 +506,7 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        let Some(count) = self.observe("track_invalid", result) else {
+        let Some(count) = self.observe("track_invalid", &key, result) else {
             return self.fallback.track_invalid();
         };
 
@@ -527,7 +534,7 @@ impl RedisRateLimiter {
         let result: RedisResult<Option<i64>> =
             redis::cmd("GET").arg(&key).query_async(&mut conn).await;
 
-        let Some(stored) = self.observe("invalid_count", result) else {
+        let Some(stored) = self.observe("invalid_count", &key, result) else {
             return self.fallback.invalid_count();
         };
         let value = stored.map_or(0, |v| u32::try_from(v).unwrap_or(u32::MAX));
@@ -552,7 +559,7 @@ impl RedisRateLimiter {
             .await;
 
         self.health_cache.remove(key);
-        let disabled = self.observe("health_record_error", result)?;
+        let disabled = self.observe("health_record_error", key, result)?;
         Some(disabled == 1)
     }
 
@@ -567,7 +574,7 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        self.observe("health_record_success", result).is_some()
+        self.observe("health_record_success", key, result).is_some()
     }
 
     fn health_snapshot(&self, key: &str) -> Option<HealthSnapshot> {
@@ -589,7 +596,7 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        let Some((disabled_at_ms, server_now_ms)) = self.observe("health_read", result) else {
+        let Some((disabled_at_ms, server_now_ms)) = self.observe("health_read", key, result) else {
             return cached.is_some_and(HealthSnapshot::is_disabled);
         };
 
@@ -631,7 +638,7 @@ impl RedisRateLimiter {
             .query_async::<Option<String>>(&mut conn)
             .await;
 
-        let Some(hash) = self.observe("route_lookup", result) else {
+        let Some(hash) = self.observe("route_lookup", &route_key, result) else {
             return stale;
         };
         self.cache_route(route_key, hash.clone());
@@ -730,7 +737,7 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        match self.observe("acquire", result) {
+        match self.observe("acquire", &bkey, result) {
             Some((1, _, _)) => AcquireOutcome::Allowed,
             Some((_, retry_ms, reason)) => {
                 let retry_after = Duration::from_millis(u64::try_from(retry_ms).unwrap_or(0));
@@ -789,7 +796,7 @@ impl RedisRateLimiter {
                 .arg(ROUTE_TTL_MS)
                 .invoke_async(&mut conn)
                 .await;
-            self.observe("update_response", result).is_some()
+            self.observe("update_response", &bkey, result).is_some()
         } else {
             let result: RedisResult<()> = redis::cmd("SET")
                 .arg(&rkey)
@@ -798,7 +805,7 @@ impl RedisRateLimiter {
                 .arg(ROUTE_TTL_MS)
                 .query_async(&mut conn)
                 .await;
-            self.observe("route_learn", result).is_some()
+            self.observe("route_learn", &rkey, result).is_some()
         };
 
         if stored {
@@ -845,7 +852,7 @@ impl RedisRateLimiter {
                 .arg(TTL_GRACE_MS)
                 .invoke_async(&mut conn)
                 .await;
-            self.observe("global_429", result).is_some()
+            self.observe("global_429", &gkey, result).is_some()
         } else {
             match self.lookup_bucket_hash(token_id, key).await {
                 Some(None) => return,
@@ -862,7 +869,7 @@ impl RedisRateLimiter {
                         .arg(TTL_GRACE_MS)
                         .invoke_async(&mut conn)
                         .await;
-                    self.observe("bucket_update", result).is_some()
+                    self.observe("bucket_update", &bkey, result).is_some()
                 }
                 None => false,
             }
@@ -958,7 +965,7 @@ async fn reconnect_loop(
     scripts: Arc<Scripts>,
     degraded: Arc<AtomicBool>,
     failures: Arc<AtomicU32>,
-    cf_key: String,
+    probe_key: Arc<Mutex<String>>,
 ) {
     let mut backoff_ms = RECONNECT_BACKOFF_MIN_MS;
     loop {
@@ -968,8 +975,8 @@ async fn reconnect_loop(
             continue;
         }
 
-        let probe: RedisResult<(u64, u64)> =
-            scripts.cf_read.key(&cf_key).invoke_async(&mut conn).await;
+        let key = probe_key.lock().expect("probe_key poisoned").clone();
+        let probe: RedisResult<i64> = redis::cmd("EXISTS").arg(&key).query_async(&mut conn).await;
         if let Err(e) = probe {
             warn!(error = %e, "redis probe failed");
             tokio::time::sleep(Duration::from_millis(jitter(backoff_ms))).await;

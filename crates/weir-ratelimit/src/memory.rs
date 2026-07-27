@@ -77,7 +77,7 @@ impl CloudflareState {
     pub fn set_blocked(&self, retry_after: Duration) {
         #[allow(clippy::cast_possible_truncation)]
         let until = crate::elapsed_millis() + retry_after.as_millis() as u64;
-        self.blocked_until_ms.store(until, Ordering::Release);
+        self.blocked_until_ms.fetch_max(until, Ordering::Release);
     }
 }
 
@@ -472,6 +472,16 @@ mod tests {
             major_id: major_id.to_owned(),
             sub_resource: None,
         }
+    }
+
+    #[test]
+    fn cloudflare_ban_is_never_shortened() {
+        let cf = CloudflareState::new();
+        cf.set_blocked(Duration::from_mins(10));
+        cf.set_blocked(Duration::from_mins(1));
+
+        let left = cf.is_blocked().expect("still blocked");
+        assert!(left > Duration::from_mins(9), "shortened to {left:?}");
     }
 
     #[test]
