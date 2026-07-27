@@ -111,7 +111,7 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_owned(),
             format: LogFormat::default(),
-            access_log: true,
+            access_log: false,
         }
     }
 }
