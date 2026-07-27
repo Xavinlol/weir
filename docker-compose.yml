@@ -22,9 +22,15 @@ services:
         "yes",
         "--maxmemory",
         "256mb",
+        # Every key has a TTL. Evicting one would silently un-ban a token.
         "--maxmemory-policy",
-        "allkeys-lru",
+        "noeviction",
       ]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
     restart: unless-stopped
 
   weir-cluster:
@@ -35,7 +41,9 @@ services:
     environment:
       - WEIR_CONFIG=/etc/weir/config.toml
       - LOG_LEVEL=${LOG_LEVEL:-info}
-    depends_on: [redis]
+    depends_on:
+      redis:
+        condition: service_healthy
     deploy:
       replicas: 3
     restart: unless-stopped
@@ -44,7 +52,8 @@ services:
     image: nginx:1.27-alpine
     profiles: [cluster]
     ports:
-      - "8080:8080"
+      # Not 8080: the single-instance service is unprofiled and always running.
+      - "8081:8080"
     volumes:
       - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on: [weir-cluster]
@@ -57,8 +66,6 @@ services:
       - "9090:9090"
     volumes:
       - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    depends_on:
-      - weir
     restart: unless-stopped
 
   grafana:
