@@ -22,7 +22,7 @@ impl Limiter {
         match self {
             Self::Memory(m) => m.acquire(auth, key, is_interaction).await,
             #[cfg(feature = "redis")]
-            Self::Redis(r) => r.acquire(auth, key, is_interaction).await,
+            Self::Redis(r) => Box::pin(r.acquire(auth, key, is_interaction)).await,
         }
     }
 
@@ -42,8 +42,15 @@ impl Limiter {
             }
             #[cfg(feature = "redis")]
             Self::Redis(r) => {
-                r.update_from_response(auth, key, bucket_hash, remaining, limit, reset_after)
-                    .await;
+                Box::pin(r.update_from_response(
+                    auth,
+                    key,
+                    bucket_hash,
+                    remaining,
+                    limit,
+                    reset_after,
+                ))
+                .await;
             }
         }
     }
@@ -63,7 +70,7 @@ impl Limiter {
             }
             #[cfg(feature = "redis")]
             Self::Redis(r) => {
-                r.handle_rate_limit(auth, key, is_global, is_cloudflare, retry_after)
+                Box::pin(r.handle_rate_limit(auth, key, is_global, is_cloudflare, retry_after))
                     .await;
             }
         }
@@ -80,7 +87,7 @@ impl Limiter {
         match self {
             Self::Memory(m) => m.report_response(auth, key, status, has_via),
             #[cfg(feature = "redis")]
-            Self::Redis(r) => r.report_response(auth, key, status, has_via).await,
+            Self::Redis(r) => Box::pin(r.report_response(auth, key, status, has_via)).await,
         }
     }
 
@@ -89,7 +96,7 @@ impl Limiter {
         match self {
             Self::Memory(m) => m.is_cloudflare_blocked(),
             #[cfg(feature = "redis")]
-            Self::Redis(r) => r.is_cloudflare_blocked().await,
+            Self::Redis(r) => Box::pin(r.is_cloudflare_blocked()).await,
         }
     }
 
@@ -98,7 +105,7 @@ impl Limiter {
         match self {
             Self::Memory(m) => m.track_invalid(),
             #[cfg(feature = "redis")]
-            Self::Redis(r) => r.track_invalid().await,
+            Self::Redis(r) => Box::pin(r.track_invalid()).await,
         }
     }
 
@@ -107,7 +114,7 @@ impl Limiter {
         match self {
             Self::Memory(m) => m.invalid_count(),
             #[cfg(feature = "redis")]
-            Self::Redis(r) => r.invalid_count().await,
+            Self::Redis(r) => Box::pin(r.invalid_count()).await,
         }
     }
 
@@ -123,7 +130,7 @@ impl Limiter {
         match self {
             Self::Memory(m) => m.run_cleanup(interval, ttl).await,
             #[cfg(feature = "redis")]
-            Self::Redis(_) => std::future::pending().await,
+            Self::Redis(r) => r.run_cleanup(interval, ttl).await,
         }
     }
 }

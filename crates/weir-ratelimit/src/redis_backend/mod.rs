@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use dashmap::DashMap;
 use metrics::{counter, gauge};
 use redis::aio::{
@@ -11,7 +11,8 @@ use redis::aio::{
 };
 use redis::cluster::ClusterClientBuilder;
 use redis::cluster_async::ClusterConnection;
-use redis::{Client, Cmd, Pipeline, RedisFuture, Script, Value};
+use redis::{Client, Cmd, Pipeline, RedisFuture, RedisResult, Script, Value};
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::memory::{AcquireResult, AuthType, HealthEvent, ManagerConfig, MemoryRateLimiter};
@@ -27,14 +28,35 @@ const WEBHOOK_NAMESPACE: &str = "wh";
 const RECONNECT_BACKOFF_MIN_MS: u64 = 1000;
 const RECONNECT_BACKOFF_MAX_MS: u64 = 30_000;
 const INVALID_WINDOW_MS: u64 = 10 * 60 * 1000;
+const DEGRADE_FAILURE_THRESHOLD: u32 = 3;
+const CACHE_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
+
+// acquire.lua ARGV[5] and its denial reason.
+const GLOBAL_SKIP: u8 = 0;
+const GLOBAL_CONSUME: u8 = 1;
+const GLOBAL_BAN_ONLY: u8 = 2;
+const REASON_GLOBAL: i64 = 1;
+
+fn cf_key(prefix: &str) -> String {
+    format!("{prefix}cf:blocked_until")
+}
+
+fn entropy() -> u64 {
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()))
+}
 
 fn jitter(base_ms: u64) -> u64 {
-    use std::time::SystemTime;
-    let entropy = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| u64::from(d.subsec_nanos()));
     let spread = base_ms / 4;
-    base_ms.saturating_sub(spread) + (entropy % (2 * spread + 1))
+    base_ms.saturating_sub(spread) + (entropy() % (2 * spread + 1))
+}
+
+/// Never returns less than `base_ms`, for waits that are deadlines rather than
+/// retry intervals.
+fn jitter_up(base_ms: u64) -> u64 {
+    base_ms.saturating_add(entropy() % (base_ms / 4 + 1))
 }
 
 /// Configuration for the Redis-backed limiter.
@@ -73,7 +95,6 @@ impl Default for RedisConfig {
 
 struct Scripts {
     acquire: Script,
-    bucket_only_acquire: Script,
     update_response: Script,
     bucket_update: Script,
     global_429: Script,
@@ -89,7 +110,6 @@ impl Scripts {
     fn compile() -> Self {
         Self {
             acquire: Script::new(include_str!("scripts/acquire.lua")),
-            bucket_only_acquire: Script::new(include_str!("scripts/bucket_only_acquire.lua")),
             update_response: Script::new(include_str!("scripts/update_response.lua")),
             bucket_update: Script::new(include_str!("scripts/bucket_update.lua")),
             global_429: Script::new(include_str!("scripts/global_429.lua")),
@@ -102,10 +122,9 @@ impl Scripts {
         }
     }
 
-    async fn load_all(&self, conn: &mut RedisConn) -> Result<()> {
+    async fn load_all(&self, conn: &mut RedisConn) {
         for (name, script) in [
             ("acquire", &self.acquire),
-            ("bucket_only_acquire", &self.bucket_only_acquire),
             ("update_response", &self.update_response),
             ("bucket_update", &self.bucket_update),
             ("global_429", &self.global_429),
@@ -116,12 +135,10 @@ impl Scripts {
             ("health_read", &self.health_read),
             ("track_invalid", &self.track_invalid),
         ] {
-            script
-                .load_async(conn)
-                .await
-                .with_context(|| format!("failed to SCRIPT LOAD {name}"))?;
+            if let Err(e) = script.load_async(conn).await {
+                warn!(error = %e, script = name, "SCRIPT LOAD failed");
+            }
         }
-        Ok(())
     }
 }
 
@@ -174,22 +191,57 @@ impl CountSnapshot {
     }
 }
 
-/// Cached `(value, server_now)` pair with the local `Instant` it was fetched at.
+fn estimated_now_ms(server_now_ms: u64, fetched_at: Instant) -> u64 {
+    let elapsed_ms = u64::try_from(fetched_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    server_now_ms.saturating_add(elapsed_ms)
+}
+
 #[derive(Clone, Copy)]
-struct Snapshot {
-    value_ms: u64,
+struct CfSnapshot {
+    blocked_until_ms: u64,
     server_now_ms: u64,
     fetched_at: Instant,
 }
 
-impl Snapshot {
+impl CfSnapshot {
     fn is_fresh(&self, ttl: Duration) -> bool {
         self.fetched_at.elapsed() < ttl
     }
 
-    fn estimated_server_now_ms(&self) -> u64 {
-        let elapsed_ms = u64::try_from(self.fetched_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        self.server_now_ms.saturating_add(elapsed_ms)
+    fn remaining(self) -> Option<Duration> {
+        let now = estimated_now_ms(self.server_now_ms, self.fetched_at);
+        (self.blocked_until_ms > now).then(|| Duration::from_millis(self.blocked_until_ms - now))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HealthSnapshot {
+    disabled_at_ms: u64,
+    server_now_ms: u64,
+    fetched_at: Instant,
+}
+
+impl HealthSnapshot {
+    fn is_fresh(&self, ttl: Duration) -> bool {
+        self.fetched_at.elapsed() < ttl
+    }
+
+    fn is_disabled(self) -> bool {
+        self.disabled_at_ms > 0
+            && estimated_now_ms(self.server_now_ms, self.fetched_at)
+                < self.disabled_at_ms + HEALTH_COOLDOWN_MS
+    }
+}
+
+#[derive(Clone)]
+struct RouteSnapshot {
+    hash: Option<String>,
+    fetched_at: Instant,
+}
+
+impl RouteSnapshot {
+    fn is_fresh(&self, ttl: Duration) -> bool {
+        self.fetched_at.elapsed() < ttl
     }
 }
 
@@ -198,15 +250,31 @@ pub struct RedisRateLimiter {
     conn: RedisConn,
     scripts: Arc<Scripts>,
     config: RedisConfig,
-    cf_cache: Mutex<Option<Snapshot>>,
-    health_cache: DashMap<String, Snapshot>,
+    cf_cache: Mutex<Option<CfSnapshot>>,
+    health_cache: DashMap<String, HealthSnapshot>,
+    route_cache: DashMap<String, RouteSnapshot>,
     invalid_cache: Mutex<Option<CountSnapshot>>,
     fallback: Arc<MemoryRateLimiter>,
     degraded: Arc<AtomicBool>,
+    failures: Arc<AtomicU32>,
+    reconnect: JoinHandle<()>,
+}
+
+impl Drop for RedisRateLimiter {
+    fn drop(&mut self) {
+        self.reconnect.abort();
+    }
 }
 
 impl RedisRateLimiter {
     pub async fn new(config: RedisConfig) -> Result<Self> {
+        if config.key_prefix.contains(['{', '}']) {
+            bail!(
+                "redis key_prefix must not contain braces: cluster hash tags depend on them (got {:?})",
+                config.key_prefix
+            );
+        }
+
         let mut conn = if config.cluster_nodes.is_empty() {
             let client = Client::open(config.url.clone())
                 .with_context(|| format!("invalid redis url: {}", config.url))?;
@@ -231,7 +299,7 @@ impl RedisRateLimiter {
         };
 
         let scripts = Arc::new(Scripts::compile());
-        scripts.load_all(&mut conn).await?;
+        scripts.load_all(&mut conn).await;
 
         let fallback = Arc::new(MemoryRateLimiter::new(ManagerConfig {
             global_limit_default: config.global_limit_default,
@@ -241,26 +309,32 @@ impl RedisRateLimiter {
             webhook_404_threshold: config.webhook_404_threshold,
         }));
         let degraded = Arc::new(AtomicBool::new(false));
+        let failures = Arc::new(AtomicU32::new(0));
 
         info!(url = %config.url, prefix = %config.key_prefix, "redis backend ready");
         gauge!("weir_redis_fallback_active").set(0.0);
 
-        let scripts_for_task = Arc::clone(&scripts);
-        let degraded_for_task = Arc::clone(&degraded);
-        let this = Self {
-            conn: conn.clone(),
+        let reconnect = tokio::spawn(reconnect_loop(
+            conn.clone(),
+            Arc::clone(&scripts),
+            Arc::clone(&degraded),
+            Arc::clone(&failures),
+            cf_key(&config.key_prefix),
+        ));
+
+        Ok(Self {
+            conn,
             scripts,
             config,
             cf_cache: Mutex::new(None),
             health_cache: DashMap::new(),
+            route_cache: DashMap::new(),
             invalid_cache: Mutex::new(None),
             fallback,
-            degraded: Arc::clone(&degraded),
-        };
-
-        tokio::spawn(reconnect_loop(conn, scripts_for_task, degraded_for_task));
-
-        Ok(this)
+            degraded,
+            failures,
+            reconnect,
+        })
     }
 
     fn token_id(auth: &AuthType) -> &str {
@@ -271,7 +345,7 @@ impl RedisRateLimiter {
     }
 
     fn cf_key(&self) -> String {
-        format!("{}cf:blocked_until", self.config.key_prefix)
+        cf_key(&self.config.key_prefix)
     }
 
     fn invalid_key(&self) -> String {
@@ -309,63 +383,88 @@ impl RedisRateLimiter {
         self.degraded.load(Ordering::Acquire)
     }
 
-    fn mark_degraded(&self, kind: &'static str) {
-        if !self.degraded.swap(true, Ordering::AcqRel) {
-            warn!(
-                reason = kind,
-                "redis degraded; falling back to in-process state"
-            );
-            gauge!("weir_redis_fallback_active").set(1.0);
+    fn observe<T>(&self, kind: &'static str, result: RedisResult<T>) -> Option<T> {
+        match result {
+            Ok(v) => {
+                self.failures.store(0, Ordering::Relaxed);
+                Some(v)
+            }
+            Err(e) => {
+                warn!(error = %e, op = kind, "redis command failed");
+                counter!("weir_redis_errors_total", "kind" => kind).increment(1);
+                if self.failures.fetch_add(1, Ordering::AcqRel) + 1 >= DEGRADE_FAILURE_THRESHOLD {
+                    self.enter_degraded(kind);
+                }
+                None
+            }
         }
-        counter!("weir_redis_errors_total", "kind" => kind).increment(1);
+    }
+
+    fn enter_degraded(&self, kind: &'static str) {
+        if self.degraded.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(remaining) = self.cf_snapshot().and_then(CfSnapshot::remaining) {
+            self.fallback.cloudflare.set_blocked(remaining);
+        }
+        warn!(
+            reason = kind,
+            "redis degraded; falling back to in-process state"
+        );
+        gauge!("weir_redis_fallback_active").set(1.0);
+    }
+
+    fn cf_snapshot(&self) -> Option<CfSnapshot> {
+        *self.cf_cache.lock().expect("cf_cache poisoned")
+    }
+
+    fn invalid_snapshot(&self) -> Option<CountSnapshot> {
+        *self.invalid_cache.lock().expect("invalid_cache poisoned")
     }
 
     pub async fn is_cloudflare_blocked(&self) -> bool {
+        self.cloudflare_block_remaining().await.is_some()
+    }
+
+    async fn cloudflare_block_remaining(&self) -> Option<Duration> {
         if self.is_degraded() {
-            return self.fallback.is_cloudflare_blocked();
+            return self.fallback.cloudflare.is_blocked();
         }
         if let Some(snap) = self
-            .cf_cache
-            .lock()
-            .expect("cf_cache poisoned")
-            .as_ref()
-            .copied()
+            .cf_snapshot()
+            .filter(|s| s.is_fresh(self.config.l1_cache_ttl))
         {
-            if snap.is_fresh(self.config.l1_cache_ttl) {
-                return snap.value_ms > 0 && snap.estimated_server_now_ms() < snap.value_ms;
-            }
+            return snap.remaining();
         }
 
         let key = self.cf_key();
         let mut conn = self.conn.clone();
-        let result: Result<(u64, u64), _> =
+        let result: RedisResult<(u64, u64)> =
             self.scripts.cf_read.key(&key).invoke_async(&mut conn).await;
 
-        let (blocked_until_ms, server_now_ms) = match result {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "redis cf_read failed");
-                self.mark_degraded("cf_read");
-                return self.fallback.is_cloudflare_blocked();
-            }
+        let Some((blocked_until_ms, server_now_ms)) = self.observe("cf_read", result) else {
+            return self
+                .cf_snapshot()
+                .and_then(CfSnapshot::remaining)
+                .or_else(|| self.fallback.cloudflare.is_blocked());
         };
 
-        let snap = Snapshot {
-            value_ms: blocked_until_ms,
+        let snap = CfSnapshot {
+            blocked_until_ms,
             server_now_ms,
             fetched_at: Instant::now(),
         };
         *self.cf_cache.lock().expect("cf_cache poisoned") = Some(snap);
 
-        blocked_until_ms > 0 && server_now_ms < blocked_until_ms
+        snap.remaining()
     }
 
-    async fn set_cloudflare_blocked(&self, retry_after: Duration) {
+    async fn set_cloudflare_blocked(&self, retry_after: Duration) -> bool {
         let key = self.cf_key();
         let mut conn = self.conn.clone();
         let retry_ms = u64::try_from(retry_after.as_millis()).unwrap_or(u64::MAX);
 
-        let result: Result<(u64, u64), _> = self
+        let result: RedisResult<(u64, u64)> = self
             .scripts
             .cf_set_blocked
             .key(&key)
@@ -374,20 +473,16 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        match result {
-            Ok((new_bu, server_now)) => {
-                let snap = Snapshot {
-                    value_ms: new_bu,
-                    server_now_ms: server_now,
-                    fetched_at: Instant::now(),
-                };
-                *self.cf_cache.lock().expect("cf_cache poisoned") = Some(snap);
-            }
-            Err(e) => {
-                warn!(error = %e, "redis cf_set_blocked failed");
-                self.mark_degraded("cf_set_blocked");
-            }
-        }
+        let Some((new_bu, server_now)) = self.observe("cf_set_blocked", result) else {
+            return false;
+        };
+
+        *self.cf_cache.lock().expect("cf_cache poisoned") = Some(CfSnapshot {
+            blocked_until_ms: new_bu,
+            server_now_ms: server_now,
+            fetched_at: Instant::now(),
+        });
+        true
     }
 
     pub async fn track_invalid(&self) -> u32 {
@@ -396,7 +491,7 @@ impl RedisRateLimiter {
         }
         let key = self.invalid_key();
         let mut conn = self.conn.clone();
-        let result: Result<i64, _> = self
+        let result: RedisResult<i64> = self
             .scripts
             .track_invalid
             .key(&key)
@@ -404,21 +499,16 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        match result {
-            Ok(count) => {
-                let value = u32::try_from(count).unwrap_or(u32::MAX);
-                *self.invalid_cache.lock().expect("invalid_cache poisoned") = Some(CountSnapshot {
-                    value,
-                    fetched_at: Instant::now(),
-                });
-                value
-            }
-            Err(e) => {
-                warn!(error = %e, "redis track_invalid failed");
-                self.mark_degraded("track_invalid");
-                self.fallback.track_invalid()
-            }
-        }
+        let Some(count) = self.observe("track_invalid", result) else {
+            return self.fallback.track_invalid();
+        };
+
+        let value = u32::try_from(count).unwrap_or(u32::MAX);
+        *self.invalid_cache.lock().expect("invalid_cache poisoned") = Some(CountSnapshot {
+            value,
+            fetched_at: Instant::now(),
+        });
+        value
     }
 
     pub async fn invalid_count(&self) -> u32 {
@@ -426,31 +516,21 @@ impl RedisRateLimiter {
             return self.fallback.invalid_count();
         }
         if let Some(snap) = self
-            .invalid_cache
-            .lock()
-            .expect("invalid_cache poisoned")
-            .as_ref()
-            .copied()
+            .invalid_snapshot()
+            .filter(|s| s.is_fresh(self.config.l1_cache_ttl))
         {
-            if snap.is_fresh(self.config.l1_cache_ttl) {
-                return snap.value;
-            }
+            return snap.value;
         }
 
         let key = self.invalid_key();
         let mut conn = self.conn.clone();
-        let result: Result<Option<i64>, _> =
+        let result: RedisResult<Option<i64>> =
             redis::cmd("GET").arg(&key).query_async(&mut conn).await;
 
-        let value = match result {
-            Ok(Some(v)) => u32::try_from(v).unwrap_or(u32::MAX),
-            Ok(None) => 0,
-            Err(e) => {
-                warn!(error = %e, "redis invalid_count read failed");
-                self.mark_degraded("invalid_count");
-                return self.fallback.invalid_count();
-            }
+        let Some(stored) = self.observe("invalid_count", result) else {
+            return self.fallback.invalid_count();
         };
+        let value = stored.map_or(0, |v| u32::try_from(v).unwrap_or(u32::MAX));
 
         *self.invalid_cache.lock().expect("invalid_cache poisoned") = Some(CountSnapshot {
             value,
@@ -459,9 +539,9 @@ impl RedisRateLimiter {
         value
     }
 
-    async fn record_health_error(&self, key: &str, threshold: u32) -> bool {
+    async fn record_health_error(&self, key: &str, threshold: u32) -> Option<bool> {
         let mut conn = self.conn.clone();
-        let result: Result<i64, _> = self
+        let result: RedisResult<i64> = self
             .scripts
             .health_record_error
             .key(key)
@@ -471,22 +551,14 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        match result {
-            Ok(v) => {
-                self.health_cache.remove(key);
-                v == 1
-            }
-            Err(e) => {
-                warn!(error = %e, "redis health_record_error failed");
-                self.mark_degraded("health_record_error");
-                false
-            }
-        }
+        self.health_cache.remove(key);
+        let disabled = self.observe("health_record_error", result)?;
+        Some(disabled == 1)
     }
 
-    async fn record_health_success(&self, key: &str) {
+    async fn record_health_success(&self, key: &str) -> bool {
         let mut conn = self.conn.clone();
-        let result: Result<i64, _> = self
+        let result: RedisResult<i64> = self
             .scripts
             .health_record_success
             .key(key)
@@ -495,27 +567,21 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        match result {
-            Ok(_) => {
-                self.health_cache.remove(key);
-            }
-            Err(e) => {
-                warn!(error = %e, "redis health_record_success failed");
-                self.mark_degraded("health_record_success");
-            }
-        }
+        self.observe("health_record_success", result).is_some()
+    }
+
+    fn health_snapshot(&self, key: &str) -> Option<HealthSnapshot> {
+        self.health_cache.get(key).map(|r| *r)
     }
 
     async fn is_health_disabled(&self, key: &str) -> bool {
-        if let Some(snap) = self.health_cache.get(key).map(|r| *r) {
-            if snap.is_fresh(self.config.l1_cache_ttl) {
-                return snap.value_ms > 0
-                    && snap.estimated_server_now_ms() < snap.value_ms + HEALTH_COOLDOWN_MS;
-            }
+        let cached = self.health_snapshot(key);
+        if let Some(snap) = cached.filter(|s| s.is_fresh(self.config.l1_cache_ttl)) {
+            return snap.is_disabled();
         }
 
         let mut conn = self.conn.clone();
-        let result: Result<(u64, u64), _> = self
+        let result: RedisResult<(u64, u64)> = self
             .scripts
             .health_read
             .key(key)
@@ -523,42 +589,53 @@ impl RedisRateLimiter {
             .invoke_async(&mut conn)
             .await;
 
-        let (disabled_at, server_now) = match result {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "redis health_read failed");
-                self.mark_degraded("health_read");
-                return false;
-            }
+        let Some((disabled_at_ms, server_now_ms)) = self.observe("health_read", result) else {
+            return cached.is_some_and(HealthSnapshot::is_disabled);
         };
 
-        self.health_cache.insert(
-            key.to_owned(),
-            Snapshot {
-                value_ms: disabled_at,
-                server_now_ms: server_now,
+        let snap = HealthSnapshot {
+            disabled_at_ms,
+            server_now_ms,
+            fetched_at: Instant::now(),
+        };
+        self.health_cache.insert(key.to_owned(), snap);
+
+        snap.is_disabled()
+    }
+
+    fn cache_route(&self, route_key: String, hash: Option<String>) {
+        self.route_cache.insert(
+            route_key,
+            RouteSnapshot {
+                hash,
                 fetched_at: Instant::now(),
             },
         );
-
-        disabled_at > 0 && server_now < disabled_at + HEALTH_COOLDOWN_MS
     }
 
-    async fn lookup_bucket_hash(&self, token_id: &str, key: &BucketKey) -> Option<String> {
+    /// Outer `None` is a failed lookup, inner `None` an unlearned route.
+    async fn lookup_bucket_hash(&self, token_id: &str, key: &BucketKey) -> Option<Option<String>> {
         let route_key = self.route_map_key(token_id, key);
+
+        let stale = match self.route_cache.get(&route_key) {
+            Some(snap) if snap.is_fresh(self.config.l1_cache_ttl) => {
+                return Some(snap.hash.clone())
+            }
+            Some(snap) => Some(snap.hash.clone()),
+            None => None,
+        };
+
         let mut conn = self.conn.clone();
-        match redis::cmd("GET")
+        let result = redis::cmd("GET")
             .arg(&route_key)
             .query_async::<Option<String>>(&mut conn)
-            .await
-        {
-            Ok(opt) => opt,
-            Err(e) => {
-                warn!(error = %e, "redis route lookup failed");
-                self.mark_degraded("route_lookup");
-                None
-            }
-        }
+            .await;
+
+        let Some(hash) = self.observe("route_lookup", result) else {
+            return stale;
+        };
+        self.cache_route(route_key, hash.clone());
+        Some(hash)
     }
 
     pub async fn acquire(
@@ -571,10 +648,8 @@ impl RedisRateLimiter {
             return self.fallback.acquire(auth, key, is_interaction).await;
         }
 
-        if self.is_cloudflare_blocked().await {
-            return AcquireResult::CloudflareLimited {
-                retry_after: Duration::from_millis(CF_BAN_MS),
-            };
+        if let Some(retry_after) = self.cloudflare_block_remaining().await {
+            return AcquireResult::CloudflareLimited { retry_after };
         }
 
         match auth {
@@ -593,45 +668,33 @@ impl RedisRateLimiter {
         }
 
         let token_id = Self::token_id(auth);
-        let bucket_hash = self.lookup_bucket_hash(token_id, key).await;
+        let bucket_hash = self.lookup_bucket_hash(token_id, key).await.flatten();
+        let global_mode = if is_interaction {
+            GLOBAL_SKIP
+        } else {
+            GLOBAL_CONSUME
+        };
 
         let outcome = self
-            .invoke_acquire(
-                token_id,
-                &key.major_id,
-                bucket_hash.as_deref(),
-                is_interaction,
-            )
+            .invoke_acquire(token_id, &key.major_id, bucket_hash.as_deref(), global_mode)
             .await;
 
-        match outcome {
-            AcquireOutcome::Allowed | AcquireOutcome::Error => AcquireResult::Allowed,
-            AcquireOutcome::GlobalLimited { retry_after } => {
-                AcquireResult::GlobalLimited { retry_after }
-            }
-            AcquireOutcome::BucketLimited { retry_after } => {
-                let wait = retry_after.min(self.config.queue_timeout);
-                tokio::time::sleep(wait).await;
-                let Some(hash) = bucket_hash.as_deref() else {
-                    return AcquireResult::Allowed;
-                };
-                // bucket_only_acquire returns only Allowed / BucketLimited / Error.
-                match self
-                    .bucket_only_acquire(token_id, &key.major_id, hash)
-                    .await
-                {
-                    AcquireOutcome::Allowed => AcquireResult::Allowed,
-                    AcquireOutcome::BucketLimited { retry_after } => {
-                        AcquireResult::BucketLimited { retry_after }
-                    }
-                    AcquireOutcome::Error | AcquireOutcome::GlobalLimited { .. } => {
-                        AcquireResult::BucketLimited {
-                            retry_after: Duration::from_secs(1),
-                        }
-                    }
-                }
-            }
-        }
+        let AcquireOutcome::BucketLimited { retry_after } = outcome else {
+            return outcome.into_result();
+        };
+
+        let retry_ms = u64::try_from(retry_after.as_millis()).unwrap_or(u64::MAX);
+        let cap_ms = u64::try_from(self.config.queue_timeout.as_millis()).unwrap_or(u64::MAX);
+        tokio::time::sleep(Duration::from_millis(jitter_up(retry_ms).min(cap_ms))).await;
+
+        let retry_mode = if is_interaction {
+            GLOBAL_SKIP
+        } else {
+            GLOBAL_BAN_ONLY
+        };
+        self.invoke_acquire(token_id, &key.major_id, bucket_hash.as_deref(), retry_mode)
+            .await
+            .into_result()
     }
 
     async fn invoke_acquire(
@@ -639,17 +702,9 @@ impl RedisRateLimiter {
         token_id: &str,
         major_id: &str,
         bucket_hash: Option<&str>,
-        is_interaction: bool,
+        global_mode: u8,
     ) -> AcquireOutcome {
         let mut conn = self.conn.clone();
-
-        if is_interaction {
-            let Some(hash) = bucket_hash else {
-                return AcquireOutcome::Allowed;
-            };
-            return self.bucket_only_acquire(token_id, major_id, hash).await;
-        }
-
         let gkey = self.global_key(token_id);
         let bkey = bucket_hash.map_or_else(
             || self.bucket_sentinel_key(token_id),
@@ -662,7 +717,7 @@ impl RedisRateLimiter {
             .copied()
             .unwrap_or(self.config.global_limit_default);
 
-        let result: Result<(i64, i64), _> = self
+        let result: RedisResult<(i64, i64, i64)> = self
             .scripts
             .acquire
             .key(&gkey)
@@ -671,54 +726,21 @@ impl RedisRateLimiter {
             .arg(GLOBAL_WINDOW_MS)
             .arg(REFILL_FALLBACK_MS)
             .arg(TTL_GRACE_MS)
+            .arg(global_mode)
             .invoke_async(&mut conn)
             .await;
 
-        match result {
-            Ok((1, _)) => AcquireOutcome::Allowed,
-            Ok((_, retry_ms)) => {
+        match self.observe("acquire", result) {
+            Some((1, _, _)) => AcquireOutcome::Allowed,
+            Some((_, retry_ms, reason)) => {
                 let retry_after = Duration::from_millis(u64::try_from(retry_ms).unwrap_or(0));
-                if bucket_hash.is_none() {
+                if reason == REASON_GLOBAL {
                     AcquireOutcome::GlobalLimited { retry_after }
                 } else {
                     AcquireOutcome::BucketLimited { retry_after }
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "redis acquire failed");
-                self.mark_degraded("acquire");
-                AcquireOutcome::Error
-            }
-        }
-    }
-
-    async fn bucket_only_acquire(
-        &self,
-        token_id: &str,
-        major_id: &str,
-        bucket_hash: &str,
-    ) -> AcquireOutcome {
-        let mut conn = self.conn.clone();
-        let bkey = self.bucket_key(token_id, bucket_hash, major_id);
-        let result: Result<(i64, i64), _> = self
-            .scripts
-            .bucket_only_acquire
-            .key(&bkey)
-            .arg(REFILL_FALLBACK_MS)
-            .arg(TTL_GRACE_MS)
-            .invoke_async(&mut conn)
-            .await;
-
-        match result {
-            Ok((1, _)) => AcquireOutcome::Allowed,
-            Ok((_, retry_ms)) => AcquireOutcome::BucketLimited {
-                retry_after: Duration::from_millis(u64::try_from(retry_ms).unwrap_or(0)),
-            },
-            Err(e) => {
-                warn!(error = %e, "redis bucket_only_acquire failed");
-                self.mark_degraded("bucket_only_acquire");
-                AcquireOutcome::Error
-            }
+            None => AcquireOutcome::Error,
         }
     }
 
@@ -743,35 +765,53 @@ impl RedisRateLimiter {
             return;
         }
         let Some(hash) = bucket_hash else { return };
-        let (Some(rem), Some(lim), Some(reset)) = (remaining, limit, reset_after) else {
-            return;
-        };
 
         let token_id = Self::token_id(auth);
-        let bkey = self.bucket_key(token_id, hash, &key.major_id);
         let rkey = self.route_map_key(token_id, key);
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let reset_after_ms = (reset.max(0.0) * 1000.0) as u64;
-
         let mut conn = self.conn.clone();
-        let result: Result<i64, _> = self
-            .scripts
-            .update_response
-            .key(&bkey)
-            .key(&rkey)
-            .arg(rem)
-            .arg(reset_after_ms)
-            .arg(lim)
-            .arg(TTL_GRACE_MS)
-            .arg(hash)
-            .arg(ROUTE_TTL_MS)
-            .invoke_async(&mut conn)
-            .await;
 
-        if let Err(e) = result {
-            warn!(error = %e, "redis update_response failed");
-            self.mark_degraded("update_response");
+        let stored = if let (Some(rem), Some(lim), Some(reset)) = (remaining, limit, reset_after) {
+            let bkey = self.bucket_key(token_id, hash, &key.major_id);
+
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let reset_after_ms = (reset.max(0.0) * 1000.0) as u64;
+
+            let result: RedisResult<i64> = self
+                .scripts
+                .update_response
+                .key(&bkey)
+                .key(&rkey)
+                .arg(rem)
+                .arg(reset_after_ms)
+                .arg(lim)
+                .arg(TTL_GRACE_MS)
+                .arg(hash)
+                .arg(ROUTE_TTL_MS)
+                .invoke_async(&mut conn)
+                .await;
+            self.observe("update_response", result).is_some()
+        } else {
+            let result: RedisResult<()> = redis::cmd("SET")
+                .arg(&rkey)
+                .arg(hash)
+                .arg("PX")
+                .arg(ROUTE_TTL_MS)
+                .query_async(&mut conn)
+                .await;
+            self.observe("route_learn", result).is_some()
+        };
+
+        if stored {
+            self.cache_route(rkey, Some(hash.to_owned()));
+        } else {
+            self.fallback.update_from_response(
+                auth,
+                key,
+                bucket_hash,
+                remaining,
+                limit,
+                reset_after,
+            );
         }
     }
 
@@ -789,18 +829,15 @@ impl RedisRateLimiter {
             return;
         }
 
-        if is_cloudflare {
-            self.set_cloudflare_blocked(retry_after).await;
-            return;
-        }
-
+        let retry_ms = u64::try_from(retry_after.as_millis()).unwrap_or(u64::MAX);
         let token_id = Self::token_id(auth);
 
-        if is_global {
+        let stored = if is_cloudflare {
+            self.set_cloudflare_blocked(retry_after).await
+        } else if is_global {
             let gkey = self.global_key(token_id);
-            let retry_ms = u64::try_from(retry_after.as_millis()).unwrap_or(u64::MAX);
             let mut conn = self.conn.clone();
-            let result: Result<i64, _> = self
+            let result: RedisResult<i64> = self
                 .scripts
                 .global_429
                 .key(&gkey)
@@ -808,33 +845,32 @@ impl RedisRateLimiter {
                 .arg(TTL_GRACE_MS)
                 .invoke_async(&mut conn)
                 .await;
-            if let Err(e) = result {
-                warn!(error = %e, "redis global_429 failed");
-                self.mark_degraded("global_429");
+            self.observe("global_429", result).is_some()
+        } else {
+            match self.lookup_bucket_hash(token_id, key).await {
+                Some(None) => return,
+                Some(Some(hash)) => {
+                    let bkey = self.bucket_key(token_id, &hash, &key.major_id);
+                    let mut conn = self.conn.clone();
+                    let result: RedisResult<i64> = self
+                        .scripts
+                        .bucket_update
+                        .key(&bkey)
+                        .arg(0_i64)
+                        .arg(retry_ms)
+                        .arg(0_i64)
+                        .arg(TTL_GRACE_MS)
+                        .invoke_async(&mut conn)
+                        .await;
+                    self.observe("bucket_update", result).is_some()
+                }
+                None => false,
             }
-            return;
-        }
-
-        let Some(hash) = self.lookup_bucket_hash(token_id, key).await else {
-            return;
         };
-        let bkey = self.bucket_key(token_id, &hash, &key.major_id);
-        let retry_ms = u64::try_from(retry_after.as_millis()).unwrap_or(u64::MAX);
 
-        let mut conn = self.conn.clone();
-        let result: Result<i64, _> = self
-            .scripts
-            .bucket_update
-            .key(&bkey)
-            .arg(0_i64)
-            .arg(retry_ms)
-            .arg(0_i64)
-            .arg(TTL_GRACE_MS)
-            .invoke_async(&mut conn)
-            .await;
-        if let Err(e) = result {
-            warn!(error = %e, "redis bucket_update failed");
-            self.mark_degraded("bucket_update");
+        if !stored {
+            self.fallback
+                .handle_rate_limit(auth, key, is_global, is_cloudflare, retry_after);
         }
     }
 
@@ -849,69 +885,101 @@ impl RedisRateLimiter {
             return self.fallback.report_response(auth, key, status, has_via);
         }
         if status == 403 && !has_via {
-            self.set_cloudflare_blocked(Duration::from_millis(CF_BAN_MS))
-                .await;
+            if !self
+                .set_cloudflare_blocked(Duration::from_millis(CF_BAN_MS))
+                .await
+            {
+                return self.fallback.report_response(auth, key, status, has_via);
+            }
             return HealthEvent::CloudflareBanned;
         }
 
-        match auth {
-            AuthType::Bot(id) | AuthType::Bearer(id) => {
-                let hkey = self.token_health_key(id);
-                if (200..300).contains(&status) {
-                    self.record_health_success(&hkey).await;
-                } else if has_via
-                    && (status == 401 || status == 403)
-                    && self
-                        .record_health_error(&hkey, self.config.token_error_threshold)
-                        .await
-                {
-                    return HealthEvent::TokenDisabled;
-                }
-            }
-            AuthType::Webhook => {
-                let hkey = self.webhook_health_key(&key.major_id);
-                if status == 404 {
-                    if self
-                        .record_health_error(&hkey, self.config.webhook_404_threshold)
-                        .await
-                    {
-                        return HealthEvent::WebhookDisabled;
-                    }
-                } else {
-                    self.record_health_success(&hkey).await;
-                }
-            }
+        let (hkey, threshold, is_error) = match auth {
+            AuthType::Bot(id) | AuthType::Bearer(id) => (
+                self.token_health_key(id),
+                self.config.token_error_threshold,
+                has_via && (status == 401 || status == 403),
+            ),
+            AuthType::Webhook => (
+                self.webhook_health_key(&key.major_id),
+                self.config.webhook_404_threshold,
+                status == 404,
+            ),
+        };
+
+        if is_error {
+            return match self.record_health_error(&hkey, threshold).await {
+                Some(true) if matches!(auth, AuthType::Webhook) => HealthEvent::WebhookDisabled,
+                Some(true) => HealthEvent::TokenDisabled,
+                Some(false) => HealthEvent::None,
+                None => self.fallback.report_response(auth, key, status, has_via),
+            };
+        }
+
+        let resets = match auth {
+            AuthType::Bot(_) | AuthType::Bearer(_) => (200..300).contains(&status),
+            AuthType::Webhook => true,
+        };
+        if resets && !self.record_health_success(&hkey).await {
+            return self.fallback.report_response(auth, key, status, has_via);
         }
 
         HealthEvent::None
     }
 
     pub fn bucket_count(&self) -> usize {
-        if self.is_degraded() {
-            return self.fallback.bucket_count();
+        self.fallback.bucket_count()
+    }
+
+    pub async fn run_cleanup(&self, interval: Duration, ttl: Duration) {
+        let mut fallback_tick = tokio::time::interval(interval);
+        let mut cache_tick = tokio::time::interval(CACHE_PRUNE_INTERVAL);
+        fallback_tick.tick().await;
+        cache_tick.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = fallback_tick.tick() => { self.fallback.cleanup_expired(ttl); }
+                _ = cache_tick.tick() => {
+                    // Keeps stale disabled entries on purpose: they hold a ban
+                    // across an outage when the health read cannot be served.
+                    self.health_cache.retain(|_, snap| snap.is_disabled());
+                    self.route_cache
+                        .retain(|_, snap| snap.is_fresh(self.config.l1_cache_ttl));
+                }
+            }
         }
-        0
     }
 }
 
-async fn reconnect_loop(mut conn: RedisConn, scripts: Arc<Scripts>, degraded: Arc<AtomicBool>) {
+/// Probes with a keyed script: `PING` is broadcast to every cluster primary.
+async fn reconnect_loop(
+    mut conn: RedisConn,
+    scripts: Arc<Scripts>,
+    degraded: Arc<AtomicBool>,
+    failures: Arc<AtomicU32>,
+    cf_key: String,
+) {
     let mut backoff_ms = RECONNECT_BACKOFF_MIN_MS;
     loop {
-        tokio::time::sleep(Duration::from_millis(jitter(backoff_ms))).await;
         if !degraded.load(Ordering::Acquire) {
             backoff_ms = RECONNECT_BACKOFF_MIN_MS;
+            tokio::time::sleep(Duration::from_millis(RECONNECT_BACKOFF_MIN_MS)).await;
             continue;
         }
-        let Ok(_) = redis::cmd("PING").query_async::<String>(&mut conn).await else {
-            backoff_ms = (backoff_ms * 2).min(RECONNECT_BACKOFF_MAX_MS);
-            continue;
-        };
-        if let Err(e) = scripts.load_all(&mut conn).await {
-            warn!(error = %e, "redis reconnect: SCRIPT LOAD failed");
+
+        let probe: RedisResult<(u64, u64)> =
+            scripts.cf_read.key(&cf_key).invoke_async(&mut conn).await;
+        if let Err(e) = probe {
+            warn!(error = %e, "redis probe failed");
+            tokio::time::sleep(Duration::from_millis(jitter(backoff_ms))).await;
             backoff_ms = (backoff_ms * 2).min(RECONNECT_BACKOFF_MAX_MS);
             continue;
         }
+
+        scripts.load_all(&mut conn).await;
         backoff_ms = RECONNECT_BACKOFF_MIN_MS;
+        failures.store(0, Ordering::Relaxed);
         if degraded.swap(false, Ordering::AcqRel) {
             info!("redis reconnected, leaving fallback mode");
             gauge!("weir_redis_fallback_active").set(0.0);
@@ -925,4 +993,94 @@ enum AcquireOutcome {
     GlobalLimited { retry_after: Duration },
     BucketLimited { retry_after: Duration },
     Error,
+}
+
+impl AcquireOutcome {
+    fn into_result(self) -> AcquireResult {
+        match self {
+            Self::Error => {
+                counter!("weir_redis_fail_open_total").increment(1);
+                AcquireResult::Allowed
+            }
+            Self::Allowed => AcquireResult::Allowed,
+            Self::GlobalLimited { retry_after } => AcquireResult::GlobalLimited { retry_after },
+            Self::BucketLimited { retry_after } => AcquireResult::BucketLimited { retry_after },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jitter_up_never_shortens_the_wait() {
+        for base in [0, 1, 250, 1000, 30_000] {
+            for _ in 0..64 {
+                let j = jitter_up(base);
+                assert!(j >= base, "jitter_up({base}) = {j}");
+                assert!(j <= base + base / 4 + 1, "jitter_up({base}) = {j}");
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_stays_within_a_quarter_either_way() {
+        for base in [1000, 30_000] {
+            for _ in 0..64 {
+                let j = jitter(base);
+                assert!(j >= base - base / 4 && j <= base + base / 4, "{j}");
+            }
+        }
+    }
+
+    #[test]
+    fn cf_snapshot_reports_time_left_on_the_redis_clock() {
+        let snap = CfSnapshot {
+            blocked_until_ms: 5_000,
+            server_now_ms: 4_000,
+            fetched_at: Instant::now(),
+        };
+        assert!(snap.remaining().is_some_and(|d| d.as_millis() <= 1000));
+
+        let expired = CfSnapshot {
+            blocked_until_ms: 4_000,
+            server_now_ms: 4_000,
+            fetched_at: Instant::now(),
+        };
+        assert!(expired.remaining().is_none());
+    }
+
+    #[test]
+    fn health_snapshot_disabled_only_within_the_cooldown() {
+        let now = 1_000_000;
+        let fresh = HealthSnapshot {
+            disabled_at_ms: now,
+            server_now_ms: now,
+            fetched_at: Instant::now(),
+        };
+        assert!(fresh.is_disabled());
+
+        let elapsed = HealthSnapshot {
+            disabled_at_ms: now,
+            server_now_ms: now + HEALTH_COOLDOWN_MS,
+            fetched_at: Instant::now(),
+        };
+        assert!(!elapsed.is_disabled());
+
+        let never = HealthSnapshot {
+            disabled_at_ms: 0,
+            server_now_ms: now,
+            fetched_at: Instant::now(),
+        };
+        assert!(!never.is_disabled());
+    }
+
+    #[test]
+    fn redis_errors_fail_open() {
+        assert!(matches!(
+            AcquireOutcome::Error.into_result(),
+            AcquireResult::Allowed
+        ));
+    }
 }
