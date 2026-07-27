@@ -102,8 +102,10 @@ mod tests {
     fn a_shorter_block_never_shortens_an_existing_one() {
         let rl = GlobalRateLimit::new(50);
         rl.set_blocked(Duration::from_mins(10));
+        let deadline = rl.blocked_until_ms.load(Ordering::Relaxed);
+
         rl.set_blocked(Duration::from_secs(1));
-        assert!(!rl.try_acquire(), "the 10 minute block must still stand");
+        assert_eq!(rl.blocked_until_ms.load(Ordering::Relaxed), deadline);
     }
 
     #[test]

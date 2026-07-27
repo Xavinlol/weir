@@ -291,7 +291,7 @@ impl RedisRateLimiter {
             let cluster = ClusterClientBuilder::new(config.cluster_nodes.clone())
                 .connection_timeout(config.connect_timeout)
                 .response_timeout(config.command_timeout)
-                .overall_response_timeout(Some(config.command_timeout.max(CLUSTER_RETRY_BUDGET)))
+                .overall_response_timeout(Some(config.command_timeout + CLUSTER_RETRY_BUDGET))
                 .build()
                 .context("invalid redis cluster config")?;
             let cc = cluster
@@ -959,7 +959,7 @@ impl RedisRateLimiter {
     }
 }
 
-/// Probes with a keyed script: `PING` is broadcast to every cluster primary.
+/// Probes one key rather than `PING`, which is broadcast to every cluster primary.
 async fn reconnect_loop(
     mut conn: RedisConn,
     scripts: Arc<Scripts>,
