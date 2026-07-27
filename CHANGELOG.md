@@ -1,3 +1,12 @@
+# [0.2.0](https://github.com/Xavinlol/weir/compare/v0.1.12...v0.2.0) (2026-07-27)
+
+
+### Features
+
+* **ratelimit:** redis backed distributed mode ([aeef5f6](https://github.com/Xavinlol/weir/commit/aeef5f68e072af0302d18579f640a10d092c040f))
+
+
+
 ## [0.1.12](https://github.com/Xavinlol/weir/compare/v0.1.11...v0.1.12) (2026-04-22)
 
 
@@ -31,15 +40,6 @@
 ### Bug Fixes
 
 * **ratelimit:** always try acquire after queue wait ([#12](https://github.com/Xavinlol/weir/issues/12)) ([f68680c](https://github.com/Xavinlol/weir/commit/f68680cad26e2c6f0343721ec6dee25ca9d3cbb4))
-
-
-
-## [0.1.8](https://github.com/Xavinlol/weir/compare/v0.1.7...v0.1.8) (2026-04-18)
-
-
-### Bug Fixes
-
-* **ratelimit:** webhook health cleanup and README fixes ([072e2a1](https://github.com/Xavinlol/weir/commit/072e2a132543618c0754ee7d3521d36c174761e2))
 
 
 
