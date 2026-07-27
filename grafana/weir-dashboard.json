@@ -122,6 +122,7 @@
     },
     {
       "title": "Active Buckets",
+      "description": "Buckets tracked in process. On the Redis backend this counts fallback state only, so it reads 0 unless the instance has degraded.",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
@@ -413,8 +414,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(weir_requests_total{instance=~\"$instance\", bot_id=~\"$bot_id\"}[$__rate_interval])) by (route)",
-          "legendFormat": "{{route}}",
+          "expr": "sum(rate(weir_requests_total{instance=~\"$instance\", bot_id=~\"$bot_id\"}[$__rate_interval])) by (route, status, method)",
+          "legendFormat": "[{{method}}] {{route}} {{status}}",
           "refId": "A"
         }
       ]
@@ -476,6 +477,34 @@
         {
           "expr": "sum(rate(weir_redis_reconnects_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "reconnects",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Redis Fail-Open (rate)",
+      "description": "Requests sent to Discord with no rate limit check at all, because the Redis call failed. Unlike the fallback gauge, these were not limited in process either.",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 },
+          "unit": "cps",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.001 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(weir_redis_fail_open_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "fail-open",
           "refId": "A"
         }
       ]
