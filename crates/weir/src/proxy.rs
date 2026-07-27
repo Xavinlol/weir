@@ -10,7 +10,7 @@ use weir_ratelimit::memory::{AcquireResult, AuthType, HealthEvent};
 use weir_ratelimit::route::parse_bucket_key;
 
 use crate::request::Auth;
-use crate::response::{has_via_header, RateLimitHeaders, RateLimitScope};
+use crate::response::{has_via_header, RateLimitHeaders, RateLimitScope, MAX_RESET_AFTER_SECS};
 use crate::server::AppState;
 
 const DISCORD_BASE: &str = "https://discord.com";
@@ -425,7 +425,9 @@ async fn handle_429(
         .ok()
         .and_then(|b| b.retry_after)
         .unwrap_or(0.0);
-    let retry_after_secs = header_retry.max(body_retry);
+    let retry_after_secs = header_retry
+        .max(body_retry)
+        .clamp(0.0, MAX_RESET_AFTER_SECS);
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let retry_after = Duration::from_millis((retry_after_secs * 1000.0) as u64);
