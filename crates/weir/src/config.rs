@@ -50,7 +50,6 @@ pub enum LogFormat {
 pub struct RatelimitConfig {
     pub backend: RatelimitBackend,
     pub global_limit_default: u32,
-    pub disable_global_detection: bool,
     pub bucket_ttl_ms: u64,
     pub cleanup_interval_ms: u64,
     pub queue_timeout_ms: u64,
@@ -122,7 +121,6 @@ impl Default for RatelimitConfig {
         Self {
             backend: RatelimitBackend::default(),
             global_limit_default: 50,
-            disable_global_detection: false,
             bucket_ttl_ms: 86_400_000,
             cleanup_interval_ms: 300_000,
             queue_timeout_ms: 10_000,
