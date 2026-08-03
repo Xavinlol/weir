@@ -133,12 +133,18 @@ pub fn parse_bucket_key(method: &str, path: &str) -> BucketKey {
             major_id: major_id_str.to_owned(),
             sub_resource: classify_sub_resource(method, sub_path),
         },
-        Resource::Webhooks => BucketKey {
-            method: method_enum,
-            resource,
-            major_id: major_id_str.to_owned(),
-            sub_resource: None,
-        },
+        Resource::Webhooks => {
+            let token = sub_path.split('/').next().filter(|s| s.len() >= 60);
+            BucketKey {
+                method: method_enum,
+                resource,
+                major_id: match token {
+                    Some(t) => format!("{major_id_str}:{:016x}", fnv1a(t)),
+                    None => major_id_str.to_owned(),
+                },
+                sub_resource: None,
+            }
+        }
         _ => BucketKey {
             method: method_enum,
             resource,
@@ -146,6 +152,13 @@ pub fn parse_bucket_key(method: &str, path: &str) -> BucketKey {
             sub_resource: None,
         },
     }
+}
+
+#[inline]
+fn fnv1a(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 #[inline]
@@ -220,9 +233,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_webhook_route() {
-        let key = parse_bucket_key("POST", "/api/v10/webhooks/111/token");
+    fn parse_webhook_route_without_token() {
+        let key = parse_bucket_key("GET", "/api/v10/webhooks/111");
         assert_eq!(key.resource, Resource::Webhooks);
+        assert_eq!(key.major_id, "111");
+    }
+
+    #[test]
+    fn webhook_token_scopes_the_bucket() {
+        let token_a = "a".repeat(68);
+        let token_b = "b".repeat(68);
+        let key_a = parse_bucket_key("POST", &format!("/api/v10/webhooks/111/{token_a}"));
+        let key_b = parse_bucket_key("POST", &format!("/api/v10/webhooks/111/{token_b}"));
+        let key_a2 = parse_bucket_key(
+            "POST",
+            &format!("/api/v10/webhooks/111/{token_a}/messages/@original"),
+        );
+
+        assert!(key_a.major_id.starts_with("111:"));
+        assert!(!key_a.major_id.contains(&token_a));
+        assert_ne!(key_a.major_id, key_b.major_id);
+        assert_eq!(key_a.major_id, key_a2.major_id);
+    }
+
+    #[test]
+    fn webhook_short_segment_is_not_a_token() {
+        let key = parse_bucket_key("GET", "/api/v10/webhooks/111/github");
         assert_eq!(key.major_id, "111");
     }
 
