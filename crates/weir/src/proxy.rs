@@ -82,7 +82,7 @@ pub async fn handle(
                 route_label,
                 request_start,
             );
-            return Err(rate_limit_response(retry_after, false));
+            return Err(rate_limit_response(retry_after, LimitKind::Cloudflare));
         }
         AcquireResult::GlobalLimited { retry_after } => {
             debug!("global rate limited");
@@ -95,7 +95,7 @@ pub async fn handle(
                 route_label,
                 request_start,
             );
-            return Err(rate_limit_response(retry_after, true));
+            return Err(rate_limit_response(retry_after, LimitKind::Global));
         }
         AcquireResult::BucketLimited { retry_after } => {
             debug!(bucket = %bucket_key, "bucket rate limited");
@@ -108,7 +108,7 @@ pub async fn handle(
                 route_label,
                 request_start,
             );
-            return Err(rate_limit_response(retry_after, false));
+            return Err(rate_limit_response(retry_after, LimitKind::Bucket));
         }
         AcquireResult::QueueTimeout => {
             debug!(bucket = %bucket_key, "queue timeout");
@@ -121,7 +121,10 @@ pub async fn handle(
                 route_label,
                 request_start,
             );
-            return Err(rate_limit_response(Duration::from_secs(1), false));
+            return Err(rate_limit_response(
+                Duration::from_secs(1),
+                LimitKind::Bucket,
+            ));
         }
         AcquireResult::TokenDisabled => {
             warn!("token disabled due to consecutive errors");
@@ -598,22 +601,41 @@ fn is_api_keyword(s: &str) -> bool {
         && bytes.iter().all(|&b| b.is_ascii_lowercase() || b == b'-')
 }
 
-fn rate_limit_response(retry_after: Duration, is_global: bool) -> Response<Body> {
+/// Crafted 429 flavor. `Cloudflare` deliberately omits the `via` header:
+/// clients (e.g. JDA) read a via-less 429 as an upstream Cloudflare ban.
+#[derive(Clone, Copy, PartialEq)]
+enum LimitKind {
+    Cloudflare,
+    Global,
+    Bucket,
+}
+
+fn rate_limit_response(retry_after: Duration, kind: LimitKind) -> Response<Body> {
     let retry_secs = retry_after.as_secs_f64();
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let retry_header = format!("{}", retry_secs.ceil() as u64);
+    let is_global = kind == LimitKind::Global;
     let body = format!(
         r#"{{"message":"You are being rate limited.","retry_after":{retry_secs:.3},"global":{is_global},"proxy":"weir"}}"#
     );
 
-    Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::TOO_MANY_REQUESTS)
         .header("content-type", HeaderValue::from_static("application/json"))
         .header(
             "retry-after",
             HeaderValue::from_str(&retry_header).unwrap_or(HeaderValue::from_static("1")),
         )
-        .header("x-sent-by-proxy", HeaderValue::from_static("weir"))
+        .header("x-sent-by-proxy", HeaderValue::from_static("weir"));
+
+    if kind != LimitKind::Cloudflare {
+        builder = builder.header("via", HeaderValue::from_static("1.1 weir"));
+    }
+    if is_global {
+        builder = builder.header("x-ratelimit-global", HeaderValue::from_static("true"));
+    }
+
+    builder
         .body(Body::from(body))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
@@ -621,6 +643,27 @@ fn rate_limit_response(retry_after: Duration, is_global: bool) -> Response<Body>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bucket_429_carries_via() {
+        let resp = rate_limit_response(Duration::from_secs(1), LimitKind::Bucket);
+        assert_eq!(resp.headers().get("via").unwrap(), "1.1 weir");
+        assert!(resp.headers().get("x-ratelimit-global").is_none());
+    }
+
+    #[test]
+    fn global_429_carries_via_and_global_header() {
+        let resp = rate_limit_response(Duration::from_secs(1), LimitKind::Global);
+        assert_eq!(resp.headers().get("via").unwrap(), "1.1 weir");
+        assert_eq!(resp.headers().get("x-ratelimit-global").unwrap(), "true");
+    }
+
+    #[test]
+    fn cloudflare_429_omits_via() {
+        let resp = rate_limit_response(Duration::from_secs(30), LimitKind::Cloudflare);
+        assert!(resp.headers().get("via").is_none());
+        assert_eq!(resp.headers().get("retry-after").unwrap(), "30");
+    }
 
     #[test]
     fn metrics_route_channels_messages() {
