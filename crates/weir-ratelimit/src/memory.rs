@@ -205,14 +205,13 @@ impl MemoryRateLimiter {
     }
 
     /// Check rate limits before forwarding a request to Discord.
-    pub async fn acquire(
-        &self,
-        auth: &AuthType,
-        key: &BucketKey,
-        is_interaction: bool,
-    ) -> AcquireResult {
+    pub async fn acquire(&self, auth: &AuthType, key: &BucketKey) -> AcquireResult {
         if let Some(retry_after) = self.cloudflare.is_blocked() {
             return AcquireResult::CloudflareLimited { retry_after };
+        }
+
+        if key.is_interaction() {
+            return AcquireResult::Allowed;
         }
 
         let state = self.get_state(auth);
@@ -225,7 +224,7 @@ impl MemoryRateLimiter {
             return AcquireResult::WebhookDisabled;
         }
 
-        if !is_interaction && !state.global.try_acquire() {
+        if !state.global.try_acquire() {
             let retry_after = Duration::from_secs(1);
             return AcquireResult::GlobalLimited { retry_after };
         }
@@ -313,6 +312,10 @@ impl MemoryRateLimiter {
         limit: Option<u32>,
         reset_after: Option<f64>,
     ) {
+        if key.is_interaction() {
+            return;
+        }
+
         let state = self.get_state(auth);
 
         // Learn bucket hash for this route
@@ -395,6 +398,10 @@ impl MemoryRateLimiter {
         if status == 403 && !has_via {
             self.cloudflare.set_blocked(Duration::from_mins(1));
             return HealthEvent::CloudflareBanned;
+        }
+
+        if key.is_interaction() {
+            return HealthEvent::None;
         }
 
         match auth {
@@ -499,7 +506,7 @@ mod tests {
         let auth = AuthType::Bot("123".to_owned());
         let key = test_key("GET", Resource::Channels, "456");
 
-        let result = manager.acquire(&auth, &key, false).await;
+        let result = manager.acquire(&auth, &key).await;
         assert!(matches!(result, AcquireResult::Allowed));
     }
 
@@ -513,15 +520,15 @@ mod tests {
         let key = test_key("GET", Resource::Channels, "456");
 
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::Allowed
         ));
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::Allowed
         ));
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::GlobalLimited { .. }
         ));
     }
@@ -532,18 +539,69 @@ mod tests {
             global_limit_default: 1,
             ..Default::default()
         });
-        let auth = AuthType::Bot("123".to_owned());
-        let key = test_key("POST", Resource::Interactions, "!");
+        let auth = AuthType::Webhook;
+        let regular = test_key("POST", Resource::Webhooks, "789");
+        let interaction = test_key("POST", Resource::Interactions, "!");
 
-        // First consumes the global token
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &regular).await,
             AcquireResult::Allowed
         ));
-        // Second would be blocked by global, but interaction skips it
         assert!(matches!(
-            manager.acquire(&auth, &key, true).await,
+            manager.acquire(&auth, &regular).await,
+            AcquireResult::GlobalLimited { .. }
+        ));
+        assert!(matches!(
+            manager.acquire(&auth, &interaction).await,
             AcquireResult::Allowed
+        ));
+    }
+
+    #[tokio::test]
+    async fn interaction_learns_no_bucket() {
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
+        let auth = AuthType::Webhook;
+        let key = test_key("POST", Resource::Interactions, "!");
+
+        manager.update_from_response(&auth, &key, Some("abc"), Some(0), Some(1), Some(60.0));
+        assert_eq!(manager.bucket_count(), 0);
+        assert!(matches!(
+            manager.acquire(&auth, &key).await,
+            AcquireResult::Allowed
+        ));
+    }
+
+    #[tokio::test]
+    async fn interaction_404s_never_disable() {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
+            webhook_404_threshold: 2,
+            ..Default::default()
+        });
+        let auth = AuthType::Webhook;
+        let key = test_key("POST", Resource::Interactions, "!");
+
+        for _ in 0..5 {
+            assert_eq!(
+                manager.report_response(&auth, &key, 404, true),
+                HealthEvent::None
+            );
+        }
+        assert!(matches!(
+            manager.acquire(&auth, &key).await,
+            AcquireResult::Allowed
+        ));
+    }
+
+    #[tokio::test]
+    async fn cloudflare_still_blocks_interactions() {
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
+        let auth = AuthType::Webhook;
+        let key = test_key("POST", Resource::Interactions, "!");
+
+        manager.cloudflare.set_blocked(Duration::from_mins(1));
+        assert!(matches!(
+            manager.acquire(&auth, &key).await,
+            AcquireResult::CloudflareLimited { .. }
         ));
     }
 
@@ -555,7 +613,7 @@ mod tests {
 
         manager.cloudflare.set_blocked(Duration::from_mins(1));
 
-        let result = manager.acquire(&auth, &key, false).await;
+        let result = manager.acquire(&auth, &key).await;
         assert!(matches!(result, AcquireResult::CloudflareLimited { .. }));
     }
 
@@ -570,7 +628,7 @@ mod tests {
 
         // First request: unknown route, allowed
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::Allowed
         ));
 
@@ -579,12 +637,12 @@ mod tests {
 
         // Second request: known route, bucket has 1 remaining
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::Allowed
         ));
 
         // Third request: bucket exhausted, will queue and timeout
-        let result = manager.acquire(&auth, &key, false).await;
+        let result = manager.acquire(&auth, &key).await;
         assert!(matches!(
             result,
             AcquireResult::BucketLimited { .. } | AcquireResult::QueueTimeout
@@ -603,17 +661,17 @@ mod tests {
 
         // Token 1 exhausts its global limit
         assert!(matches!(
-            manager.acquire(&auth1, &key, false).await,
+            manager.acquire(&auth1, &key).await,
             AcquireResult::Allowed
         ));
         assert!(matches!(
-            manager.acquire(&auth1, &key, false).await,
+            manager.acquire(&auth1, &key).await,
             AcquireResult::GlobalLimited { .. }
         ));
 
         // Token 2 is independent
         assert!(matches!(
-            manager.acquire(&auth2, &key, false).await,
+            manager.acquire(&auth2, &key).await,
             AcquireResult::Allowed
         ));
     }
@@ -628,11 +686,11 @@ mod tests {
         let key = test_key("POST", Resource::Webhooks, "789");
 
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::Allowed
         ));
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::GlobalLimited { .. }
         ));
     }
@@ -713,15 +771,15 @@ mod tests {
         assert_eq!(state.global.limit(), 1);
 
         assert!(matches!(
-            manager.acquire(&auth_overridden, &key, false).await,
+            manager.acquire(&auth_overridden, &key).await,
             AcquireResult::Allowed
         ));
         assert!(matches!(
-            manager.acquire(&auth_default, &key, false).await,
+            manager.acquire(&auth_default, &key).await,
             AcquireResult::Allowed
         ));
         assert!(matches!(
-            manager.acquire(&auth_default, &key, false).await,
+            manager.acquire(&auth_default, &key).await,
             AcquireResult::GlobalLimited { .. }
         ));
     }
@@ -742,7 +800,7 @@ mod tests {
         );
 
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::TokenDisabled
         ));
     }
@@ -763,7 +821,7 @@ mod tests {
         );
 
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::WebhookDisabled
         ));
     }
@@ -807,7 +865,7 @@ mod tests {
 
         manager.webhook_health.report_404(&key.major_id, 1);
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::Allowed
         ));
     }
@@ -823,13 +881,13 @@ mod tests {
 
         // Teach route, consume the single token, then drain the bucket
         manager.update_from_response(&auth, &key, Some("abc"), Some(1), Some(1), Some(0.3));
-        let _ = manager.acquire(&auth, &key, false).await;
+        let _ = manager.acquire(&auth, &key).await;
         manager.update_from_response(&auth, &key, Some("abc"), Some(0), Some(1), Some(0.3));
 
         // Deferred wake should fire well before queue_timeout_ms
         let start = std::time::Instant::now();
         assert!(matches!(
-            manager.acquire(&auth, &key, false).await,
+            manager.acquire(&auth, &key).await,
             AcquireResult::Allowed
         ));
         assert!(start.elapsed() < Duration::from_millis(1_500));

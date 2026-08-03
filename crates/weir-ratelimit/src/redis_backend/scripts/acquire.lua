@@ -1,7 +1,7 @@
 -- KEYS[1] = global key, KEYS[2] = bucket key
 -- ARGV[1] = global_limit, ARGV[2] = global_window_ms
 -- ARGV[3] = bucket_refill_fallback_ms, ARGV[4] = ttl_grace_ms
--- ARGV[5] = global_mode: 0 = skip, 1 = check and consume a slot, 2 = ban check only
+-- ARGV[5] = global_mode: 1 = check and consume a slot, 2 = ban check only
 -- returns: {allowed:0|1, retry_after_ms, reason:0 = none, 1 = global, 2 = bucket}
 
 local t   = redis.call('TIME')

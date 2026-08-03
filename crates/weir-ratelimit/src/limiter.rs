@@ -13,16 +13,11 @@ pub enum Limiter {
 }
 
 impl Limiter {
-    pub async fn acquire(
-        &self,
-        auth: &AuthType,
-        key: &BucketKey,
-        is_interaction: bool,
-    ) -> AcquireResult {
+    pub async fn acquire(&self, auth: &AuthType, key: &BucketKey) -> AcquireResult {
         match self {
-            Self::Memory(m) => m.acquire(auth, key, is_interaction).await,
+            Self::Memory(m) => m.acquire(auth, key).await,
             #[cfg(feature = "redis")]
-            Self::Redis(r) => Box::pin(r.acquire(auth, key, is_interaction)).await,
+            Self::Redis(r) => Box::pin(r.acquire(auth, key)).await,
         }
     }
 

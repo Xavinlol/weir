@@ -42,7 +42,7 @@ async fn two_instances_share_bucket() {
     let auth = AuthType::Bot("123".to_owned());
     let key = channels_key("456");
 
-    let allow_a = pod_a.acquire(&auth, &key, false).await;
+    let allow_a = pod_a.acquire(&auth, &key).await;
     assert!(matches!(allow_a, AcquireResult::Allowed));
 
     pod_a
@@ -54,7 +54,7 @@ async fn two_instances_share_bucket() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let denied = pod_b.acquire(&auth, &key, false).await;
+    let denied = pod_b.acquire(&auth, &key).await;
     assert!(
         matches!(denied, AcquireResult::BucketLimited { .. }),
         "pod B should see drained bucket, got {denied:?}"
@@ -94,20 +94,20 @@ async fn override_applies_on_redis_hot_path() {
     let key = channels_key("1");
 
     for _ in 0..3 {
-        let r = pod.acquire(&vip, &key, false).await;
+        let r = pod.acquire(&vip, &key).await;
         assert!(matches!(r, AcquireResult::Allowed), "vip slot {r:?}");
     }
     assert!(matches!(
-        pod.acquire(&vip, &key, false).await,
+        pod.acquire(&vip, &key).await,
         AcquireResult::GlobalLimited { .. }
     ));
 
     assert!(matches!(
-        pod.acquire(&normal, &key, false).await,
+        pod.acquire(&normal, &key).await,
         AcquireResult::Allowed
     ));
     assert!(matches!(
-        pod.acquire(&normal, &key, false).await,
+        pod.acquire(&normal, &key).await,
         AcquireResult::GlobalLimited { .. }
     ));
 }
@@ -127,11 +127,11 @@ async fn global_limit_enforced_on_learned_route() {
         .await;
 
     for slot in 0..2 {
-        let r = pod.acquire(&auth, &key, false).await;
+        let r = pod.acquire(&auth, &key).await;
         assert!(matches!(r, AcquireResult::Allowed), "slot {slot}: {r:?}");
     }
 
-    let denied = pod.acquire(&auth, &key, false).await;
+    let denied = pod.acquire(&auth, &key).await;
     assert!(
         matches!(denied, AcquireResult::GlobalLimited { .. }),
         "global limit must apply to a learned route, got {denied:?}"
@@ -152,7 +152,7 @@ async fn global_ban_denies_learned_route() {
     pod.handle_rate_limit(&auth, &key, true, false, Duration::from_secs(5))
         .await;
 
-    let denied = pod.acquire(&auth, &key, false).await;
+    let denied = pod.acquire(&auth, &key).await;
     assert!(
         matches!(denied, AcquireResult::GlobalLimited { .. }),
         "global ban must outrank bucket headroom, got {denied:?}"
@@ -173,7 +173,7 @@ async fn route_learned_without_numeric_headers() {
     pod.handle_rate_limit(&auth, &key, false, false, Duration::from_secs(5))
         .await;
 
-    let denied = pod.acquire(&auth, &key, false).await;
+    let denied = pod.acquire(&auth, &key).await;
     assert!(
         matches!(denied, AcquireResult::BucketLimited { .. }),
         "route should have been learned from the hash alone, got {denied:?}"
@@ -189,17 +189,19 @@ async fn interactions_bypass_global_limit() {
     let pod = RedisRateLimiter::new(cfg).await.expect("pod");
 
     let auth = AuthType::Bot("g4".to_owned());
-    let key = channels_key("1");
-
-    pod.update_from_response(&auth, &key, Some("bh"), Some(100), Some(100), Some(60.0))
-        .await;
+    let regular = channels_key("1");
+    let interaction = parse_bucket_key("POST", "/api/v10/interactions/1/tok/callback");
 
     assert!(matches!(
-        pod.acquire(&auth, &key, false).await,
+        pod.acquire(&auth, &regular).await,
         AcquireResult::Allowed
     ));
+    assert!(matches!(
+        pod.acquire(&auth, &regular).await,
+        AcquireResult::GlobalLimited { .. }
+    ));
     for _ in 0..3 {
-        let r = pod.acquire(&auth, &key, true).await;
+        let r = pod.acquire(&auth, &interaction).await;
         assert!(matches!(r, AcquireResult::Allowed), "interaction {r:?}");
     }
 }
@@ -222,7 +224,7 @@ async fn token_disable_propagates_across_pods() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let denied = pod_b.acquire(&auth, &key, false).await;
+    let denied = pod_b.acquire(&auth, &key).await;
     assert!(
         matches!(denied, AcquireResult::TokenDisabled),
         "pod B should see the disabled token, got {denied:?}"
@@ -243,14 +245,14 @@ async fn interleaved_success_prevents_cross_pod_disable() {
     let key = channels_key("1");
 
     // Warms pod B's health cache before any error exists.
-    pod_b.acquire(&auth, &key, false).await;
+    pod_b.acquire(&auth, &key).await;
 
     for _ in 0..3 {
         pod_a.report_response(&auth, &key, 401, true).await;
         pod_b.report_response(&auth, &key, 200, true).await;
     }
 
-    let after = pod_a.acquire(&auth, &key, false).await;
+    let after = pod_a.acquire(&auth, &key).await;
     assert!(
         matches!(after, AcquireResult::Allowed),
         "interleaved successes should keep the token enabled, got {after:?}"
@@ -289,7 +291,7 @@ async fn outage_falls_back() {
     let auth = AuthType::Bot("555".to_owned());
     let key = channels_key("1");
 
-    let r = pod.acquire(&auth, &key, false).await;
+    let r = pod.acquire(&auth, &key).await;
     assert!(matches!(r, AcquireResult::Allowed));
 
     container.stop().await.expect("stop redis");
@@ -297,7 +299,7 @@ async fn outage_falls_back() {
     // Only the in-process fallback can return GlobalLimited here.
     let mut outcomes = Vec::new();
     for _ in 0..4 {
-        outcomes.push(pod.acquire(&auth, &key, false).await);
+        outcomes.push(pod.acquire(&auth, &key).await);
     }
 
     assert!(

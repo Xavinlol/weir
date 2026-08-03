@@ -33,7 +33,6 @@ const CACHE_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 const CLUSTER_RETRY_BUDGET: Duration = Duration::from_secs(3);
 
 // acquire.lua ARGV[5] and its denial reason.
-const GLOBAL_SKIP: u8 = 0;
 const GLOBAL_CONSUME: u8 = 1;
 const GLOBAL_BAN_ONLY: u8 = 2;
 const REASON_GLOBAL: i64 = 1;
@@ -645,18 +644,17 @@ impl RedisRateLimiter {
         Some(hash)
     }
 
-    pub async fn acquire(
-        &self,
-        auth: &AuthType,
-        key: &BucketKey,
-        is_interaction: bool,
-    ) -> AcquireResult {
+    pub async fn acquire(&self, auth: &AuthType, key: &BucketKey) -> AcquireResult {
         if self.is_degraded() {
-            return self.fallback.acquire(auth, key, is_interaction).await;
+            return self.fallback.acquire(auth, key).await;
         }
 
         if let Some(retry_after) = self.cloudflare_block_remaining().await {
             return AcquireResult::CloudflareLimited { retry_after };
+        }
+
+        if key.is_interaction() {
+            return AcquireResult::Allowed;
         }
 
         match auth {
@@ -676,14 +674,14 @@ impl RedisRateLimiter {
 
         let token_id = Self::token_id(auth);
         let bucket_hash = self.lookup_bucket_hash(token_id, key).await.flatten();
-        let global_mode = if is_interaction {
-            GLOBAL_SKIP
-        } else {
-            GLOBAL_CONSUME
-        };
 
         let outcome = self
-            .invoke_acquire(token_id, &key.major_id, bucket_hash.as_deref(), global_mode)
+            .invoke_acquire(
+                token_id,
+                &key.major_id,
+                bucket_hash.as_deref(),
+                GLOBAL_CONSUME,
+            )
             .await;
 
         let AcquireOutcome::BucketLimited { retry_after } = outcome else {
@@ -694,14 +692,14 @@ impl RedisRateLimiter {
         let cap_ms = u64::try_from(self.config.queue_timeout.as_millis()).unwrap_or(u64::MAX);
         tokio::time::sleep(Duration::from_millis(jitter_up(retry_ms).min(cap_ms))).await;
 
-        let retry_mode = if is_interaction {
-            GLOBAL_SKIP
-        } else {
-            GLOBAL_BAN_ONLY
-        };
-        self.invoke_acquire(token_id, &key.major_id, bucket_hash.as_deref(), retry_mode)
-            .await
-            .into_result()
+        self.invoke_acquire(
+            token_id,
+            &key.major_id,
+            bucket_hash.as_deref(),
+            GLOBAL_BAN_ONLY,
+        )
+        .await
+        .into_result()
     }
 
     async fn invoke_acquire(
@@ -760,6 +758,9 @@ impl RedisRateLimiter {
         limit: Option<u32>,
         reset_after: Option<f64>,
     ) {
+        if key.is_interaction() {
+            return;
+        }
         if self.is_degraded() {
             self.fallback.update_from_response(
                 auth,
@@ -899,6 +900,10 @@ impl RedisRateLimiter {
                 return self.fallback.report_response(auth, key, status, has_via);
             }
             return HealthEvent::CloudflareBanned;
+        }
+
+        if key.is_interaction() {
+            return HealthEvent::None;
         }
 
         let (hkey, threshold, is_error) = match auth {

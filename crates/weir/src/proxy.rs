@@ -61,7 +61,6 @@ pub async fn handle(
     let request_start = Instant::now();
     let auth_type = extract_auth_type(&parts.headers);
     let bucket_key = parse_bucket_key(&method_str, path);
-    let is_interaction = bucket_key.is_interaction();
 
     let (auth_label, bot_id) = match &auth_type {
         AuthType::Bot(id) => ("bot", id.as_str()),
@@ -70,11 +69,7 @@ pub async fn handle(
     };
     let route_label = metrics_route(path);
 
-    match state
-        .rate_limiter
-        .acquire(&auth_type, &bucket_key, is_interaction)
-        .await
-    {
+    match state.rate_limiter.acquire(&auth_type, &bucket_key).await {
         AcquireResult::Allowed => {}
         AcquireResult::CloudflareLimited { retry_after } => {
             warn!("cloudflare rate limited");
