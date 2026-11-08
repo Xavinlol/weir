@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -106,6 +107,22 @@ impl TokenState {
             route_map: DashMap::new(),
             buckets: DashMap::new(),
         }
+    }
+
+    /// Evicts expired buckets along with the routes that point at them. Returns the eviction count.
+    fn prune(&self, ttl: Duration) -> u64 {
+        let before = self.buckets.len();
+        self.buckets.retain(|_, e| !e.bucket.is_expired(ttl));
+        let evicted = before.saturating_sub(self.buckets.len()) as u64;
+
+        let mut bucket_key = String::new();
+        self.route_map.retain(|route, hash| {
+            bucket_key.clear();
+            let _ = write!(bucket_key, "{hash}:{}", route.major_id);
+            self.buckets.contains_key(&bucket_key)
+        });
+
+        evicted
     }
 }
 
@@ -263,42 +280,12 @@ impl MemoryRateLimiter {
     /// Also prunes stale `route_map` entries and empty token states.
     /// Returns the number of evicted bucket entries.
     pub fn cleanup_expired(&self, ttl: Duration) -> u64 {
-        let mut evicted = 0u64;
-
-        // Clean buckets and route_map for each token
+        let mut evicted = self.ip_state.prune(ttl);
         self.tokens.retain(|_, state| {
-            let before = state.buckets.len();
-            state.buckets.retain(|_, e| !e.bucket.is_expired(ttl));
-            evicted += before.saturating_sub(state.buckets.len()) as u64;
-
-            // Prune route_map entries whose bucket hash is no longer present
-            state.route_map.retain(|_, hash| {
-                state
-                    .buckets
-                    .iter()
-                    .any(|e| e.key().starts_with(hash.as_str()))
-            });
-
-            // Keep the token state if it still has buckets or routes
+            evicted += state.prune(ttl);
             !state.buckets.is_empty() || !state.route_map.is_empty()
         });
-
-        // Clean IP-based (webhook) state
-        let before = self.ip_state.buckets.len();
-        self.ip_state
-            .buckets
-            .retain(|_, e| !e.bucket.is_expired(ttl));
-        evicted += before.saturating_sub(self.ip_state.buckets.len()) as u64;
-
-        self.ip_state.route_map.retain(|_, hash| {
-            self.ip_state
-                .buckets
-                .iter()
-                .any(|e| e.key().starts_with(hash.as_str()))
-        });
-
         self.webhook_health.cleanup_idle();
-
         evicted
     }
 
@@ -320,7 +307,10 @@ impl MemoryRateLimiter {
 
         // Learn bucket hash for this route
         if let Some(hash) = bucket_hash {
-            state.route_map.insert(key.clone(), hash.to_owned());
+            let known = state.route_map.get(key).is_some_and(|h| *h == hash);
+            if !known {
+                state.route_map.insert(key.clone(), hash.to_owned());
+            }
 
             let hash_key = format!("{hash}:{}", key.major_id);
             let entry = self.get_or_create_bucket(&state, &hash_key);
@@ -749,6 +739,34 @@ mod tests {
         let evicted = manager.cleanup_expired(Duration::from_hours(1));
         assert_eq!(evicted, 0);
         assert_eq!(state.buckets.len(), 1);
+    }
+
+    #[test]
+    fn cleanup_drops_routes_of_evicted_buckets() {
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
+        let auth = AuthType::Bot("123".to_owned());
+        let live = test_key("GET", Resource::Channels, "1");
+        let gone = test_key("GET", Resource::Channels, "2");
+
+        manager.update_from_response(&auth, &live, Some("abc"), Some(5), Some(10), Some(1.0));
+        manager.update_from_response(&auth, &gone, Some("abc"), Some(5), Some(10), Some(1.0));
+        let state = manager.get_state(&auth);
+        state.buckets.remove("abc:2");
+
+        manager.cleanup_expired(Duration::from_hours(1));
+        assert!(state.route_map.contains_key(&live));
+        assert!(!state.route_map.contains_key(&gone));
+    }
+
+    #[test]
+    fn cleanup_releases_idle_tokens() {
+        let manager = MemoryRateLimiter::new(ManagerConfig::default());
+        let auth = AuthType::Bearer("user".to_owned());
+        let key = test_key("GET", Resource::Channels, "1");
+
+        manager.update_from_response(&auth, &key, Some("abc"), Some(5), Some(10), Some(1.0));
+        manager.cleanup_expired(Duration::ZERO);
+        assert!(manager.tokens.is_empty());
     }
 
     #[tokio::test]
