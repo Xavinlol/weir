@@ -69,7 +69,7 @@ impl Bucket {
 
         let acquired = self
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 let (remaining, epoch) = unpack_state(current);
                 if remaining == 0 {
                     None
@@ -93,7 +93,7 @@ impl Bucket {
         self.limit.store(limit, Ordering::Release);
         let _ = self
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 let (_, epoch) = unpack_state(current);
                 Some(pack_state(remaining, epoch.wrapping_add(1)))
             });

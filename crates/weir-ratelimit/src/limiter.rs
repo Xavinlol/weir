@@ -12,6 +12,10 @@ pub enum Limiter {
     Redis(Box<RedisRateLimiter>),
 }
 
+#[cfg_attr(
+    not(feature = "redis"),
+    allow(clippy::unused_async, clippy::unused_async_trait_impl)
+)]
 impl Limiter {
     pub async fn acquire(&self, auth: &AuthType, key: &BucketKey) -> AcquireResult {
         match self {
@@ -21,7 +25,6 @@ impl Limiter {
         }
     }
 
-    #[allow(clippy::unused_async)]
     pub async fn update_from_response(
         &self,
         auth: &AuthType,
@@ -50,7 +53,6 @@ impl Limiter {
         }
     }
 
-    #[allow(clippy::unused_async)]
     pub async fn handle_rate_limit(
         &self,
         auth: &AuthType,
@@ -71,7 +73,6 @@ impl Limiter {
         }
     }
 
-    #[allow(clippy::unused_async)]
     pub async fn report_response(
         &self,
         auth: &AuthType,
@@ -86,7 +87,6 @@ impl Limiter {
         }
     }
 
-    #[allow(clippy::unused_async)]
     pub async fn is_cloudflare_blocked(&self) -> bool {
         match self {
             Self::Memory(m) => m.is_cloudflare_blocked(),
@@ -95,7 +95,6 @@ impl Limiter {
         }
     }
 
-    #[allow(clippy::unused_async)]
     pub async fn track_invalid(&self) -> u32 {
         match self {
             Self::Memory(m) => m.track_invalid(),
@@ -104,7 +103,6 @@ impl Limiter {
         }
     }
 
-    #[allow(clippy::unused_async)]
     pub async fn invalid_count(&self) -> u32 {
         match self {
             Self::Memory(m) => m.invalid_count(),

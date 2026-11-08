@@ -36,7 +36,7 @@ struct RateLimitBody {
     retry_after: Option<f64>,
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::result_large_err)]
 pub async fn handle(
     State(state): State<AppState>,
     req: Request<Body>,
