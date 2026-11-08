@@ -21,7 +21,7 @@ jobs:
       tag: ${{ steps.changelog.outputs.tag }}
       version: ${{ steps.changelog.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +45,7 @@ jobs:
     needs: changelog
     if: needs.changelog.outputs.skipped != 'true'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.changelog.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
@@ -58,7 +58,7 @@ jobs:
     needs: [changelog, test]
     if: needs.changelog.outputs.skipped != 'true'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.changelog.outputs.tag }}
       - uses: docker/setup-buildx-action@v4
