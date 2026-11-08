@@ -1,3 +1,12 @@
+## [0.2.3](https://github.com/Xavinlol/weir/compare/v0.2.2...v0.2.3) (2026-11-08)
+
+
+### Bug Fixes
+
+* build on rust 1.99 ([e6c0cb9](https://github.com/Xavinlol/weir/commit/e6c0cb92f7a668f06b0eb2d96cf7d516d1e48369))
+
+
+
 ## [0.2.2](https://github.com/Xavinlol/weir/compare/v0.2.1...v0.2.2) (2026-11-08)
 
 
@@ -34,15 +43,6 @@
 ### Bug Fixes
 
 * **ratelimit:** self-heal drained bucket when no update arrives ([#15](https://github.com/Xavinlol/weir/issues/15)) ([b0a84a6](https://github.com/Xavinlol/weir/commit/b0a84a676ae03d349f32c613fa19bf1298b26aea))
-
-
-
-## [0.1.11](https://github.com/Xavinlol/weir/compare/v0.1.10...v0.1.11) (2026-04-19)
-
-
-### Bug Fixes
-
-* **ratelimit:** schedule wake for drained buckets with known reset ([#14](https://github.com/Xavinlol/weir/issues/14)) ([886b2b3](https://github.com/Xavinlol/weir/commit/886b2b3318deba28d3cc62c0bb54ba6ba0d674f9))
 
 
 
