@@ -33,6 +33,7 @@ const CACHE_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 const CLUSTER_RETRY_BUDGET: Duration = Duration::from_secs(3);
 
 // acquire.lua ARGV[5] and its denial reason.
+const GLOBAL_SKIP: u8 = 0;
 const GLOBAL_CONSUME: u8 = 1;
 const GLOBAL_BAN_ONLY: u8 = 2;
 const REASON_GLOBAL: i64 = 1;
@@ -674,14 +675,14 @@ impl RedisRateLimiter {
 
         let token_id = Self::token_id(auth);
         let bucket_hash = self.lookup_bucket_hash(token_id, key).await.flatten();
+        let (global_mode, retry_mode) = if key.bypasses_global() {
+            (GLOBAL_SKIP, GLOBAL_SKIP)
+        } else {
+            (GLOBAL_CONSUME, GLOBAL_BAN_ONLY)
+        };
 
         let outcome = self
-            .invoke_acquire(
-                token_id,
-                &key.major_id,
-                bucket_hash.as_deref(),
-                GLOBAL_CONSUME,
-            )
+            .invoke_acquire(token_id, &key.major_id, bucket_hash.as_deref(), global_mode)
             .await;
 
         let AcquireOutcome::BucketLimited { retry_after } = outcome else {
@@ -692,14 +693,9 @@ impl RedisRateLimiter {
         let cap_ms = u64::try_from(self.config.queue_timeout.as_millis()).unwrap_or(u64::MAX);
         tokio::time::sleep(Duration::from_millis(jitter_up(retry_ms).min(cap_ms))).await;
 
-        self.invoke_acquire(
-            token_id,
-            &key.major_id,
-            bucket_hash.as_deref(),
-            GLOBAL_BAN_ONLY,
-        )
-        .await
-        .into_result()
+        self.invoke_acquire(token_id, &key.major_id, bucket_hash.as_deref(), retry_mode)
+            .await
+            .into_result()
     }
 
     async fn invoke_acquire(

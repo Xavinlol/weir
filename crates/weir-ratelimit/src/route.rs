@@ -1,10 +1,14 @@
 use std::fmt;
 
+/// Base64 of `interaction:`, the prefix of every interaction token.
+const INTERACTION_TOKEN_PREFIX: &str = "aW50ZXJhY3Rpb246";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resource {
     Channels,
     Guilds,
     Webhooks,
+    InteractionWebhooks,
     Invites,
     Interactions,
     Unknown,
@@ -16,6 +20,7 @@ impl fmt::Display for Resource {
             Self::Channels => "channels",
             Self::Guilds => "guilds",
             Self::Webhooks => "webhooks",
+            Self::InteractionWebhooks => "interaction-webhooks",
             Self::Invites => "invites",
             Self::Interactions => "interactions",
             Self::Unknown => "unknown",
@@ -94,6 +99,13 @@ impl BucketKey {
     pub fn is_interaction(&self) -> bool {
         self.resource == Resource::Interactions
     }
+
+    pub fn bypasses_global(&self) -> bool {
+        matches!(
+            self.resource,
+            Resource::Interactions | Resource::InteractionWebhooks
+        )
+    }
 }
 
 impl fmt::Display for BucketKey {
@@ -137,7 +149,12 @@ pub fn parse_bucket_key(method: &str, path: &str) -> BucketKey {
             let token = sub_path.split('/').next().filter(|s| s.len() >= 60);
             BucketKey {
                 method: method_enum,
-                resource,
+                resource: match token {
+                    Some(t) if t.starts_with(INTERACTION_TOKEN_PREFIX) => {
+                        Resource::InteractionWebhooks
+                    }
+                    _ => resource,
+                },
                 major_id: match token {
                     Some(t) => format!("{major_id_str}:{:016x}", fnv1a(t)),
                     None => major_id_str.to_owned(),
@@ -254,6 +271,24 @@ mod tests {
         assert!(!key_a.major_id.contains(&token_a));
         assert_ne!(key_a.major_id, key_b.major_id);
         assert_eq!(key_a.major_id, key_a2.major_id);
+    }
+
+    #[test]
+    fn interaction_token_marks_a_followup() {
+        let token = format!("{INTERACTION_TOKEN_PREFIX}{}", "x".repeat(150));
+        let followup = parse_bucket_key(
+            "PATCH",
+            &format!("/api/v10/webhooks/111/{token}/messages/@original"),
+        );
+        let webhook =
+            parse_bucket_key("POST", &format!("/api/v10/webhooks/111/{}", "a".repeat(68)));
+
+        assert_eq!(followup.resource, Resource::InteractionWebhooks);
+        assert!(followup.bypasses_global());
+        assert!(!followup.is_interaction());
+        assert!(!followup.major_id.contains(&token));
+        assert_eq!(webhook.resource, Resource::Webhooks);
+        assert!(!webhook.bypasses_global());
     }
 
     #[test]

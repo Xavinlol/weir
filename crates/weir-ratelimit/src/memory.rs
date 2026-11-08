@@ -241,7 +241,7 @@ impl MemoryRateLimiter {
             return AcquireResult::WebhookDisabled;
         }
 
-        if !state.global.try_acquire() {
+        if !key.bypasses_global() && !state.global.try_acquire() {
             let retry_after = Duration::from_secs(1);
             return AcquireResult::GlobalLimited { retry_after };
         }
@@ -544,6 +544,33 @@ mod tests {
         assert!(matches!(
             manager.acquire(&auth, &interaction).await,
             AcquireResult::Allowed
+        ));
+    }
+
+    #[tokio::test]
+    async fn followup_skips_global_but_keeps_its_bucket() {
+        let manager = MemoryRateLimiter::new(ManagerConfig {
+            global_limit_default: 1,
+            queue_timeout_ms: 50,
+            ..Default::default()
+        });
+        let auth = AuthType::Bot("123".to_owned());
+        let regular = test_key("GET", Resource::Channels, "1");
+        let followup = test_key("PATCH", Resource::InteractionWebhooks, "111:ab");
+
+        assert!(matches!(
+            manager.acquire(&auth, &regular).await,
+            AcquireResult::Allowed
+        ));
+        assert!(matches!(
+            manager.acquire(&auth, &followup).await,
+            AcquireResult::Allowed
+        ));
+
+        manager.update_from_response(&auth, &followup, Some("fh"), Some(0), Some(5), Some(60.0));
+        assert!(matches!(
+            manager.acquire(&auth, &followup).await,
+            AcquireResult::BucketLimited { .. } | AcquireResult::QueueTimeout
         ));
     }
 

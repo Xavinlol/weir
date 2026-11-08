@@ -204,6 +204,16 @@ async fn interactions_bypass_global_limit() {
         let r = pod.acquire(&auth, &interaction).await;
         assert!(matches!(r, AcquireResult::Allowed), "interaction {r:?}");
     }
+
+    let followup = parse_bucket_key(
+        "PATCH",
+        &format!(
+            "/api/v10/webhooks/1/aW50ZXJhY3Rpb246{}/messages/@original",
+            "x".repeat(150)
+        ),
+    );
+    let r = pod.acquire(&auth, &followup).await;
+    assert!(matches!(r, AcquireResult::Allowed), "followup {r:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
