@@ -1,3 +1,13 @@
+## [0.2.2](https://github.com/Xavinlol/weir/compare/v0.2.1...v0.2.2) (2026-11-08)
+
+
+### Bug Fixes
+
+* **ratelimit:** evict learned routes with their bucket ([3235a70](https://github.com/Xavinlol/weir/commit/3235a70ac10125c3073003891d5da2daa117f350))
+* **ratelimit:** exempt interaction followups from the global limit ([5bcd25f](https://github.com/Xavinlol/weir/commit/5bcd25f37e5ac48e5629233dc3f8b3c3b893085b))
+
+
+
 ## [0.2.1](https://github.com/Xavinlol/weir/compare/v0.2.0...v0.2.1) (2026-08-03)
 
 
@@ -33,15 +43,6 @@
 ### Bug Fixes
 
 * **ratelimit:** schedule wake for drained buckets with known reset ([#14](https://github.com/Xavinlol/weir/issues/14)) ([886b2b3](https://github.com/Xavinlol/weir/commit/886b2b3318deba28d3cc62c0bb54ba6ba0d674f9))
-
-
-
-## [0.1.10](https://github.com/Xavinlol/weir/compare/v0.1.9...v0.1.10) (2026-04-18)
-
-
-### Bug Fixes
-
-* **ratelimit:** prevent bucket refill from clobbering concurrent update ([#13](https://github.com/Xavinlol/weir/issues/13)) ([39eccda](https://github.com/Xavinlol/weir/commit/39eccda0dcfc34e9512e2a1cfb8a5aaf99a98e8a))
 
 
 
